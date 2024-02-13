@@ -1,0 +1,29 @@
+% use Open Sans font
+\usepackage[default,oldstyle,scale=0.95]{opensans}
+
+% use logo on top right
+\usepackage{tikz}
+\logo { 
+\begin{tikzpicture}[overlay,remember picture]
+\node[left=0.25cm] at (current page.28){
+    \includegraphics[width=1.5cm]{_extensions/sarahzeller/tud/TU_Dresden_Logo_blau_HKS41.png}
+};
+\end{tikzpicture}
+}
+
+% use circles for enumeration
+\setbeamertemplate{itemize item}[circle]
+\setbeamertemplate{itemize subitem}[circle]
+\setbeamertemplate{itemize subsubitem}[circle]
+
+% set font smaller for tables
+\AtBeginEnvironment{longtable}{\Tiny}
+\AtBeginEnvironment{tabular}{\Tiny}
+
+% Pretty tables
+\usepackage{booktabs}
+% alignment for decimal places
+\usepackage{siunitx}
+\sisetup{group-separator       = {,}, % default: \, ("thinspace")
+         group-minimum-digits  = 3,   % default: 5
+         input-decimal-markers = {.}} % default: "{.,}"
