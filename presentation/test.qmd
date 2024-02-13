@@ -1,0 +1,110 @@
+---
+title: Introduction to GIS - Exercise Syllabus
+
+format: tud-beamer
+---
+
+Please read carefully the following syllabus and try to come prepared to the first lecture.
+
+
+The goal of the exercise part of this course is to complement your knowledge of empirical literature in empirical spatial economics with hand-on experience with geo-data wrangling and analysis. The focus of the course is on presenting different aspects of working with geo-data in R, in giving you the tools to leverage your econometrics knowledge and make statistical inference using highly spatial accurate images. 
+
+
+
+
+The Exercises of the Course Introduction to GIS are going to be divide in 6 parts : 
+
+
+Part 1 - Setting up GIS in R (90 mins)
+
+   - A ) Best practices in R projects
+   
+   
+   -> before coming to this first exercise class you are expected to have tried to : 
+   
+   1) Create a github account
+   2) Create a Private folder in GitHub called Intro_to_GIS
+   3) Have R Studio and GIT installed on your personal computer
+   4) Have created an R Project and linked it to the github folder you created 
+   
+If you have any problem with the previous 4 steps please feel free to email me and/or come to the first lecture 45 to 30 minutes early and I will be trying to help you fixing the setup technical issues that you are encountering.
+   
+During the first part of this lecture a generic introduction on how to set up an healthy collaborative project will be presented, this is a fundamental part of working with geo-data in R and in R in general and at the end of the course you are expected to share with us the link to your github folder that we should be able to run without any further tweaking, failing to do so will be translated in a significative lower evaluation.
+
+
+   - B) Types of Geo-Data and leading R packages to work with them 
+   
+   - C) Projections, Coordinates and weird  geo-acronyms 
+   
+   - D) Making basics maps in R using ggplot 
+
+
+Part 2 - Geo-Data sources and Geo-data packages-types combinations (90 mins)
+
+
+     - A) Where to Download geo-data and how to load them in the project space
+     
+     - B) Points, Lines , Vectors and how to mix them up 
+     
+     - C) Rasters data types , what is a grid?
+     
+     - C) Different packages for different approaches
+     
+     
+     
+Part 3 - Basic Spatial operations (90 mins)
+
+      - A) Vector to vector operations [join, intersect]
+    
+      - B) Raster to raster operations [overlay]
+      
+      - C) Vector-Raster operations [crop, reproject]
+      
+      - D) Raster-Vector and Vector-Raster conversions 
+      
+      
+    
+Part 4 - Making cute maps using multiple types of geo-data (90 mins)
+      
+      - A)  Maps parts and features 
+      
+      - B)  Vector maps with geom_sf
+      
+      - C)  Raster maps with geom_raster
+      
+      - D)  Interactive maps using tmap
+    
+    
+Part 5 -  Multiple rasters structures and stars (90 mins)
+      
+      -A) Raster bricks and stacks
+      
+      -B) Multiple rasters operations
+      
+      -C) Stars and when to use them
+      
+      -D) Stars operations
+
+
+     
+Part 6 - Econometric Inference with geo-data (90 mins)
+
+     - A) Administrative levels and geo-data workflows
+     
+     - B) When to get rid of the coordinates 
+     
+     - C) Conley errors and clustering for spatial autocorrelation
+     
+     - D) ??
+
+
+
+
+
+
+
+
+
+
+
+   
