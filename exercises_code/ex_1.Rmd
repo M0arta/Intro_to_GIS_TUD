@@ -1,0 +1,406 @@
+---
+title: 'Exercise 1 : Setting up GIS in R and GIS basics '
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+date: "2024-03-04"
+---
+
+### Key packages
+
+- Geo-computations : sf, terra, raster 
+- Plotting : ggplot2
+- R Project management: here
+- Generic data wrangling :  dplyr, here, tidyr
+- Map of the world : rnaturalearth and rnaturalearth
+
+```{r setup, include=FALSE}
+
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  rnaturalearth,
+ rnaturalearthdata,
+  here,
+  terra,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_1.Rmd")
+
+
+```
+
+
+
+
+
+### Vectors 
+
+Geographic vectors data models are based on points located within a Coordinates Reference System (CRS): 
+
+- Points can be self standing features 
+- Two points can be connected to make a linestrings (you can also have multilinestrings)
+- Many points can be connected to get a polygon (you can also have multipolygons)
+- Many different types of geometries all together (eg. a point, a linestring and a few polygons) to get a geometry collection
+
+You can recognize geo-data because they came with a variable called geometry that contains 2 numbers: longitude and latitude 
+
+## SF package 
+
+One of the most popular and effective way to deal with vector data is to use simple feature (sf) that supports 17 types of geometries and their combination.
+
+
+
+### Let´s create some geometries and look at them 
+
+The functions to create simple features geometries (sfg) have very intuitive names: 
+
+- st_point()
+- st_linestring()
+- st_polygon()
+- st_multipoint()
+- st_multilinestring()
+
+
+We can create sfg starting from 3 types of data objects: numeric vector, a matrix , a list depending on which shape we want to generate
+
+```{r geometries}
+
+## Points , starting with numeric vectors
+
+p_1 <- st_point(c(5,2))
+
+p_2 <- st_point(c(7,3,5))
+
+p_3 <- st_point(c(8,1,4), dim = "XYM")
+
+p_4 <- st_point(c(6,3,5,9), dim = "XYZM")
+
+
+## Multipoints  , starting from matrices
+
+multi_point_matrix <- rbind(c(4,5), c(6,4), c(9,5))
+multipoint <- st_multipoint(multi_point_matrix)
+
+plot(multipoint)
+
+## Linestrings starting from matrices
+
+line_matrix <- rbind(c(4,5), c(6,4), c(9,5))
+linestring <- st_linestring(line_matrix)
+
+plot(linestring)
+
+## Polygons using lists
+
+
+border <- rbind(c(1,5), c(2,2),c(4,1),c(4,4),c(1,5))
+  
+hole <-rbind(c(2,4),c(3,4),c(3,3),c(2,3), c(2,4))
+
+poly_with_hole <- list(border, hole)
+
+polygon <- st_polygon(poly_with_hole)
+
+plot(polygon)
+
+
+
+## Geometry Collection 
+
+geom_list <- list(multipoint, linestring)
+
+geom_collection <- st_geometrycollection(geom_list)
+
+plot(geom_collection)
+
+
+
+
+```
+
+
+## Simple featury columns (sfc)
+
+This is the column of the data were the information on the geometries are saved and where also the crs is saved.
+
+
+```{r sfc}
+
+##  If we have two geometries with the same features, for eg. p_1 and p_2 from above we can put them together with st_sfc()
+
+points <- st_sfc(p_1, p_2)
+
+## In general to check for which type of geometries is the data you are working on you can always use st_geometry_type()
+
+st_geometry_type(linestring)
+
+```
+
+
+
+
+## What about Coordinates Reference Systems (crs) ? 
+
+As you probably know how we look at spatial information and any type of analysis based on the spatial relative location of different objects is determined by the way that we use to reference the objects into the space. So in fact by how we standardize the map of the world, this type of information is stored into the crs. 
+
+If you are working with a spatial object there is a function from the sf package called st_crs() and if you run it on your data you can see which projection is stored together with the data. The result could as well be NULL. So on the choice of the CRS there is an entire literature but the most widely used in economics is WGS84 that corresponds to the number 4326.
+
+The argument that contains the crs information is either epsg (SRID) or proj4string. 
+
+```{r projections}
+
+### First let´s look at the deafult (that is NA) 
+
+st_crs(multipoint)
+
+multipoint <- st_sfc(multipoint)
+
+## we can use the st_set_crs() function to assign a projection or also assign it using the same st_crs  function:
+
+multi <- st_set_crs(multipoint, 4326)
+
+
+st_crs(multi)
+
+```
+
+
+Warning : the st_set_crs() is a good idea when there is no crs at all, but if you have the "wrong " one using it would just change the value without re-projecting the data
+
+
+
+## From one projection to the other
+
+Different projections can produce different worldviews, here we look at it using a default world map from the r natural earth data package and projecting it in two different ways.
+
+
+```{r reprojections}
+
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+plot(world_map["sovereignt"])
+
+st_crs(world_map)
+
+## We see that is WGS84 and we want to change to crs to an alternative one for viz purposes, we use st_transform
+
+another_wolrd <- st_transform(world_map, crs= "ESRI:54009")
+
+plot(another_wolrd["sovereignt"])
+
+```
+
+
+
+### Data on Dresden geography, water, forest, markets etc..
+
+We will use data from the Open data portal of the municipality of Dresden :
+https://opendata.dresden.de/informationsportal/#app/mainpage/0%20{%3E}%20{00003}%20Geographie,%20Geologie,%20Geobasisdaten 
+
+
+
+We download the data in csv and then look at them to see where are the geo-location information stored. If we see that there is a column called geometry or two columns called longitude and latitude then our job is pretty easy and we just need to use the st_read function from the sf package and the data will be translated in simple features geometries.
+
+```{r data}
+
+## use the read_csv function to open the data and check the csv before to see which delimiter is used, here is ;
+
+tram_lines <- read.csv(here("data", "raw", "tram_lines.csv"),sep=';')
+
+## now we look for the columns name and data structure
+
+head(tram_lines)
+
+## the column containing the geo-informations is called geom and is as usual the last column, now we can convert the tram_lines from being a database to an sf object
+
+tram_lines_sf <- st_as_sf(tram_lines, wkt = "geom")
+
+names(tram_lines_sf)
+
+
+## check the crs 
+
+st_crs(tram_lines_sf)
+
+
+## To quickly look at the data and see if they make sense 
+
+plot(tram_lines_sf["strasse"])
+
+
+## to get a more nice vizualization we can use the geom_sf option in ggplot 
+
+ggplot() +
+  geom_sf(data = tram_lines_sf, aes(fill = historie, color = historie)) +
+  scale_color_manual(values = c(AKT = "lightblue", NEU = "salmon")) +
+  theme_void()
+
+
+## Now which type of geometry  do you think we are visualizing here? check it out with the structure function 
+
+str(tram_lines_sf)
+
+## It is a single feature collection LINESTRING
+
+```
+
+
+
+
+
+Now let´s give a look at how the open markets are spatially distributed in Dresden 
+
+```{r vectors}
+
+
+market <- read.csv(here("data", "raw", "markets.csv"),sep=';')
+head(market)
+market_sf <- st_as_sf(market, wkt = "geom")
+names(market_sf)
+
+plot(market_sf["id"])
+st_crs(market_sf)
+
+```
+
+
+Now we see only points to give it a sense with respect to the city we can plot it together with the tram lines data 
+
+
+
+## Plot the two dataset together 
+
+```{r plot}
+
+ggplot() +
+  geom_sf(data = tram_lines_sf) +
+  geom_sf(data= market_sf) +
+  theme_void()
+
+
+
+```
+
+Now you can see then city tram lines and the markets locations all in the same map , and notice that this is happening without that the two information are in the same dataset.
+
+
+
+
+
+# Rasters
+
+Now let´s step into the second main type of geo-data that we will be using in this course: raster data. 
+To deal with this type of data we are using a package called raster and for today we are going to work with the most basic type of raster: a Raster Layer. 
+
+This data type usually has a raster header and then a matrix with rows and columns that represent equally spaced cells that we usually call pixels or grid --> in short raster data are images ! 
+One cell can contain only one value and it can be either numeric or categorical.
+Rasters are usually employed for continuous measures and are generated thanks to satellite images.
+
+Each raster has values and a resolution representing how big is each cell into the grid.
+
+
+```{r grid}
+## Let´s produce a small raster of our own to look into its structure
+
+## first we define 
+raster_extent <- extent(-1.5, 1.5, -1.5, 1.5)
+raster_resolution <- 0.5
+raster_ncols <- 6
+raster_nrows <- 6
+values <- 1:36
+
+our_raster <- raster(nrows = raster_nrows, ncols = raster_ncols, 
+                     res = raster_resolution, ext = raster_extent, vals = values)
+
+plot(our_raster)
+
+
+```
+
+Ok now what happens if we change the resolution of the raster ? 
+
+Let´s make it smaller !
+
+
+```{r smaller grid}
+## Let´s produce a small raster of our own to look into its structure
+
+# using the same extent as before
+raster_resolution <- 0.05  # smaller resolution
+raster_ncols <- 60  # 6 / 0.05
+raster_nrows <- 60  # 6 / 0.05
+
+# Create the smaller raster
+smaller_raster <- raster(nrows = raster_nrows, ncols = raster_ncols, 
+                         res = raster_resolution, ext = raster_extent)
+
+values(smaller_raster) <- 1:ncell(smaller_raster)
+
+plot(smaller_raster)
+
+
+```
+
+
+The resolutions is a synonim for the granularity of the image and usually when looking for data online the data sources provide resolution in terms of degrees so our 0.5 will be a 0.5 x 0.5 dg. raster that usually corresponds to a satellite image where each pixel contains roughly 55 km x 55km.
+
+
+### Projections in Raster data 
+
+
+With raster data the st_crs() function equivalent is called projection(). To look at it we can use the volcano built-in data from the raster package and read it as a raster .
+
+The projection function requires you to specify the full proj4 definition (while for sf objects st_set_crs and st_transform are doing it automatically). The main projection used in economics is "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0" 
+
+```{r projectrasters}
+
+data(volcano)
+
+# Convert the volcano matrix to a raster object
+volcano_raster <- raster(volcano)
+
+## now let´s check the projection 
+
+projection(volcano_raster)
+
+##NA so let´s set the projection using the proj4 definition 
+
+proj4_string <- "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"
+
+projection(volcano_raster) <- proj4_string
+
+projection(volcano_raster)
+
+
+## Now to plot the raster data we can use the usual plot but calling the raster package before as below
+
+raster::plot(volcano_raster)
+
+
+```
+But if we want a higher quality plot we can also use geom_raster from ggplot that although requires us to convert the raster back to a dataframe using as.data.frame and specifying the option xy = TRUE.
+
+
+```{r plotrasters}
+
+volcano_df <- as.data.frame(volcano_raster, xy = TRUE)
+
+# Create the plot
+ggplot() +
+  geom_raster(data = volcano_df, aes(x = x, y = y, fill = layer)) +
+  scale_fill_gradientn(colors = terrain.colors(10)) +  
+  labs(x = "Longitude", y = "Latitude", title = "Volcano Raster Plot") + 
+  theme_minimal() +  
+  theme(plot.title = element_text(size = 16, face = "bold"),  
+        axis.text = element_text(size = 12),  
+        axis.title = element_text(size = 14, face = "bold"))
+
+
+```
