@@ -34,7 +34,7 @@ During the first part of this lecture a generic introduction on how to set up an
 
    - B) Types of Geo-Data and leading R packages to work with them 
    
-   - C) Projections, Coordinates and weird  geo-acronyms 
+   - C) Projections, Coordinates and weirdgeo-acronyms 
    
    - D) Making basics maps in R using ggplot 
 
@@ -95,7 +95,7 @@ Part 6 - Econometric Inference with geo-data (90 mins)
      
      - C) Conley errors and clustering for spatial autocorrelation
      
-     - D) ??
+     - D) Q&A time on final project
 
 
 
