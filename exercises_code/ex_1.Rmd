@@ -1,8 +1,8 @@
 ---
 title: 'Exercise 1 : Setting up GIS in R and GIS basics '
 output:
-  word_document: default
   html_document: default
+  word_document: default
   pdf_document: default
 date: "2024-03-04"
 ---
@@ -37,6 +37,7 @@ here::i_am("exercises_code/ex_1.Rmd")
 ```
 
 
+We will start with some lexicon to get familiar with the words used to describe data and features that involve geography.
 
 
 
@@ -49,7 +50,7 @@ Geographic vectors data models are based on points located within a Coordinates 
 - Many points can be connected to get a polygon (you can also have multipolygons)
 - Many different types of geometries all together (eg. a point, a linestring and a few polygons) to get a geometry collection
 
-You can recognize geo-data because they came with a variable called geometry that contains 2 numbers: longitude and latitude 
+You can recognize geo-data because they came with a variable called geometry that contains 2 numbers: latitude and longitude.
 
 ## SF package 
 
@@ -187,11 +188,13 @@ world_map <- ne_countries(scale = "medium", returnclass = "sf")
 
 plot(world_map["sovereignt"])
 
+
 st_crs(world_map)
 
 ## We see that is WGS84 and we want to change to crs to an alternative one for viz purposes, we use st_transform
 
 another_wolrd <- st_transform(world_map, crs= "ESRI:54009")
+
 
 plot(another_wolrd["sovereignt"])
 
@@ -402,5 +405,115 @@ ggplot() +
         axis.text = element_text(size = 12),  
         axis.title = element_text(size = 14, face = "bold"))
 
+
+```
+
+
+
+
+
+
+### Terra package 
+
+
+https://cran.r-project.org/web/packages/terra/terra.pdf
+
+
+There is a package called terra that can handle at the same time vectors and rasters and that is going to be used more and more in the future.
+This package is treating data in a different format.
+
+- Vectors are read as SpatVectors 
+- Rasters are read as SpatRasters
+
+You can also have SpatVectorCollections and SpatRastersCollections that are equivalent to lists of Vectors and Rasters
+
+
+
+Let´s open our tramline data using terra :
+
+
+```{r terravector}
+
+terra_tram <- terra::vect(tram_lines_sf)
+
+##looking at the structure of the file now that is a SpatVector
+
+str(terra_tram)
+
+##And in this format the geometry informations are no more stored in a column 
+
+names(terra_tram)
+
+
+
+```
+
+
+Let´s open our volcano raster using terra:
+
+```{r terraraster}
+
+terra_volcano <- rast(volcano)
+
+##looking at the structure of the file now that is a SpatRaster
+
+str(terra_volcano)
+
+names(terra_volcano)
+
+
+
+```
+
+
+
+We can also plot using terra specific functions and we will see in the next exercise class that many operations can be done in this formats, although most of them have alternatives in sf and raster packages. 
+
+#### Plotting in terra
+
+The function is called plot() and looks the same as the default one and the raster one so it is wise to call it as terra::plot() to be sure you are calling the function from the correct package and therefore that all the options that you are using are being correctly read. 
+
+
+```{r terraplot}
+
+
+# Plot the spatial vector
+terra::plot(terra_tram, col = "blue", lwd = 2, add = FALSE)
+
+
+
+# Plot the spatial raster
+terra::plot(terra_volcano, col = terrain.colors(10), main = "Volcano Raster")
+
+
+```
+
+
+Also for projections the functions in terra look a bit different: 
+
+
+- to check for the crs is just crs()
+- to set a crs from scratch and to change crs project()
+
+These two terra functions work for both SpatVectors and SpatRasters:
+
+```{r terracrs}
+
+
+crs(terra_tram)
+
+##Using Albert projection
+
+new_crs <- "+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=37.5 +lon_0=-97.5 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+
+terra_tram_reprojected <- project(terra_tram, new_crs)
+
+crs(terra_tram_reprojected)
+
+
+## And we can see how the resulting plots are reflecting the different crs 
+
+terra::plot(terra_tram_reprojected)
+terra::plot(terra_tram)
 
 ```

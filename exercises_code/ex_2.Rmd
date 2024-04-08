@@ -1,0 +1,636 @@
+---
+title: "Exercise 2 : Vector data, Administrative boudaries and Open Street Maps"
+output: html_document
+date: "2024-03-05"
+---
+
+### Key packages
+
+- Geo-computations : sf, terra, raster 
+- Plotting : ggplot2, ggrepel, gridExtra, ggspatial, grid
+- Geocoding : tidygeocoder
+- R Project management: here
+- Generic data wrangling :  dplyr, tidyr
+- Map of the world : rnaturalearth and rnaturalearth
+- Country and admin names : countrycode
+- Open street maps : osrm 
+
+```{r setup, include=FALSE}
+
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  rnaturalearth,
+ rnaturalearthdata,
+ grid,
+ ggspatial,
+ gridExtra,
+ ggrepel,
+ tidygeocoder,
+ osrm ,
+  here,
+  terra,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_2.Rmd")
+
+```
+
+
+
+One of the most common tasks in applied economics is to analyze phenomena across or within administrative unit borders. 
+Frequently this is the level at which survey data are geo-located, not always though sometimes you can be lucky enough that you have the geo-location of each household in the sample but it is quite rare.
+
+Being geo-located just means that in the survey data that you are using you have the name or the code of the municipality where the surveyed individuals or household are located. To actually bring the data into a spatial framing you need to merge your survey data with a shapefile of the administrative boundaries of the country you are working with. 
+
+To download administrative boundaries for all countries in the world this website is very useful and free: https://gadm.org/download_country.html 
+Here you can choose the country and the administrative level you are interested in. 
+
+Usually admin0 or admin1 is the biggest unit so the country it self, while admin2 is region or provinces and admin3 is the municipality or the county (similar to NUTS1, NUTS2 and NUTS3 if you are familiar with EU data). Administrative boundaries can be defined differently country by country and can change through time.
+
+Now we will download from GADM boundaries at the smallest available level for Germany and look at them using the sf package.
+
+Remember that we are opening only the file that ends with .shp but for it to work we should have ion the same folder and having the same name also other three files ending respectively with .prj , .dbf , .cpg , .shx .
+
+
+Starting with admin 0 that is the all country:
+
+```{r admin0}
+
+
+deu_0 <- st_read(here("data","raw", "gadm41_DEU_shp", "gadm41_DEU_0.shp"))
+
+admin_0 <- ggplot()+
+  geom_sf(data = deu_0)+
+  theme_minimal()
+print(admin_0)
+
+
+
+```
+
+
+Then Admin 1 that for Germany is states
+
+```{r admin1}
+
+deu_1 <- st_read(here("data","raw", "gadm41_DEU_shp", "gadm41_DEU_1.shp"))
+
+admin_1 <- ggplot()+
+  geom_sf(data = deu_1)+
+  theme_minimal()
+print(admin_1)
+
+
+
+```
+
+
+
+Then Admin 2 that is regions
+
+```{r admin2}
+
+deu_2 <- st_read(here("data","raw", "gadm41_DEU_shp", "gadm41_DEU_2.shp"))
+
+
+admin_2 <- ggplot()+
+  geom_sf(data = deu_2)+
+  theme_minimal()
+print(admin_2)
+
+
+
+
+
+```
+
+
+Then Admin 3 that is provinces
+
+```{r admin3}
+
+
+
+
+deu_3 <- st_read(here("data","raw", "gadm41_DEU_shp", "gadm41_DEU_3.shp"))
+
+
+admin_3 <- ggplot()+
+  geom_sf(data = deu_3)+
+  theme_minimal()
+print(admin_3)
+
+
+
+
+
+```
+
+
+And finally Admin4 that is municipalities
+```{r admin4}
+
+
+
+deu_4 <- st_read(here("data","raw", "gadm41_DEU_shp", "gadm41_DEU_4.shp"))
+
+admin_4 <- ggplot()+
+  geom_sf(data = deu_4)+
+  theme_minimal()
+print(admin_4)
+
+
+```
+
+### Cropping and selecting areas of interest 
+
+Many times we are interested in a particular area of a country or a region and we can restrict the data to a smaller area of interest employing different strategies.
+
+Now let´s say we want to have data only on Saxony or Dresden.
+
+We can look at the names in the dataset for Admin 1 or Amdin 2 and filter like for normal a data.frame
+
+```{r option1}
+
+names(deu_1)
+table(deu_1$NAME_1)
+
+saxony  <- deu_1|>
+  filter(NAME_1 == "Sachsen")
+
+saxon_plot <- ggplot()+
+  geom_sf(data = saxony)
+
+print(saxon_plot)
+
+
+names(deu_4)
+
+dresden <- deu_4 |>
+  filter(NAME_4 == "Dresden")
+
+dresden_plot <- ggplot()+
+  geom_sf(data = dresden)
+
+print(dresden_plot)
+
+### We can also combine different levels of admin, just keep in mind that the more granular you go the more names will be there but the geometry will always be at the level at which you downloaded it, so we can get a more detailed picture of Saxony using the admin 4 level data and then add a layer with only dresden in a different color for eg.
+
+
+detailed_saxon <- deu_4 |>
+  filter(NAME_1 == "Sachsen")
+
+detailed_saxon_plot <- ggplot() +
+  geom_sf(data = detailed_saxon, colour= "darkgreen")+
+  geom_sf(data = dresden,
+          aes(fill = "Dresden")) +
+  theme_minimal()
+
+print(detailed_saxon_plot)
+
+```
+
+
+Let´s say we want to have data only on Dresden area covered by trams :
+
+We can take our tramline data and use their extent to crop our admin 4 data on Dresden area.
+
+To do it we use the function crop(data_to_be_cropped, desired_extent) from the terra package
+
+
+```{r crop}
+
+tram_lines <- read.csv(here("data", "raw", "tram_lines.csv"),sep=';')
+
+tram_sf <- st_as_sf(tram_lines, wkt = "geom")
+
+# convert to spatvectors
+
+tram_terra <- vect(tram_sf)
+dresden_terra <-vect(dresden)
+
+area_tram <- crop(dresden_terra, tram_terra)
+
+
+terra::plot(area_tram)
+terra::plot(dresden_terra)
+
+
+### One drawback of terra is that spat objects are not coercible by the fortify function that runs in ggplot so we convert back to sf before plotting the two together
+
+area_tram_sf <- st_as_sf(area_tram)
+
+
+tram_area_plot <- ggplot() +
+  geom_sf(data = dresden) +
+  geom_sf(data = area_tram_sf, aes(fill = "Tram Area"), colour = "blue") +
+  labs(fill = "") +
+  theme_minimal()
+
+print(tram_area_plot)
+
+
+```
+
+We can also add the markets on the map:
+
+
+```{r markets}
+market <- read.csv(here("data", "raw", "markets.csv"),sep=';')
+market_sf <- st_as_sf(market, wkt = "geom")
+
+
+
+market_area_plot <- ggplot()+
+  geom_sf(data=dresden, colour="grey")+
+  geom_sf(data=area_tram_sf, colour="blue")+
+  geom_sf(data= market_sf, aes(fill= "Markets"),show.legend = "point",colour="red")+
+  labs(fill="")+
+  theme_minimal()
+
+print(market_area_plot)
+
+
+```
+
+
+
+## Distances 
+
+Now let´s compute the distance from this room to the nearest market.
+
+We will need the geolocation of this room, do get it we use the tidygeocoder package : 
+
+https://cran.r-project.org/web/packages/tidygeocoder/readme/README.html 
+
+That links the address to Open Street Maps to give us latitude and longitude.
+
+```{r address}
+
+husse_bau <- tibble::tribble(
+~name,~addr,
+"Hülße-Bau der TU Dresden",  "Helmholtzstraße 10, 01069 Dresden")
+
+# put the address on osm using geocode() with method = "osm"
+
+hub_geocode <- husse_bau %>%
+  geocode(addr, method = 'osm', lat = latitude , long = longitude)
+
+print(hub_geocode)
+
+# if you have the geolocation and want the address you can use reverse_geocode() 
+
+## we can convert the address to an sf object 
+
+hub_sf <- st_as_sf(hub_geocode, coords = c("longitude", "latitude"), crs = 4326)
+
+
+str(hub_sf)
+```
+
+Now let´s plot the husse bau in the map for a sanity check:
+
+
+```{r plot}
+
+ggplot() +
+  geom_sf(data=dresden, colour="grey")+
+  geom_sf(data=area_tram_sf, colour="blue")+
+  geom_sf(data=market_sf, colour="red")+
+  geom_sf(data = hub_sf,aes(fill = "Helmholtzstraße 10, 01069 Dresden"), color = "yellow") +
+  coord_sf(crs=3398)+
+  labs(fill="")+
+  theme_minimal()
+
+```
+
+It looks correct and now we can compute the distance to the nearest market using the sf function st_distance() :
+
+```{r distance}
+
+## before computing the distance let´s make sure the crs is the same for both data 
+
+hub_rp <- st_transform(hub_sf, crs=3398)
+market_rp <- st_transform(market_sf, crs=3398)
+
+hus_market_rp <- st_distance(hub_rp, market_rp)
+hus_market <- st_distance(hub_sf, market_sf)
+
+
+
+## now there are many markets so the resulting object is a list of numbers expressed in a unit of measure (here the default that is meters (m))
+
+str(hus_market)
+
+##We can assign these values to the list of markets from our market data
+
+names(market_rp)
+
+## we will use id column 
+
+hus_df <- as.data.frame(hus_market)
+hus_rp <- as.data.frame(hus_market_rp)
+
+hus_t <- as.data.frame(t(hus_df))
+hus_t_rp <- as.data.frame(t(hus_rp))
+
+hus_t$id<- market$id
+hus_t_rp$id<- market$id
+
+## now we left_join the distance as a column using the id matches
+
+market_hub_sf <- left_join(hus_t,market_sf, by="id")
+market_hub_rp <- left_join(hus_t_rp, market_rp, by="id")
+
+## we can table the distances
+
+distance <- market_hub_sf |>
+  dplyr::select("strasse", "V1")|>
+  arrange(V1)
+
+distance_rp <- market_hub_rp |>
+  dplyr::select("strasse", "V1")|>
+  arrange(V1)
+
+
+print(distance)
+print(distance_rp)
+
+```
+
+
+### Open Street Maps in R 
+
+What if we want to know the shortest distance in real terms, considering available means of transportations, elevation etc?
+
+Open street maps is a good solution and we can get data from osm using the osmr package. 
+
+https://github.com/riatelab/osrm 
+
+
+- osrmTable() uses the table service to query time/distance matrices
+- osrmRoute() uses the route service to query routes
+- osrmTrip() uses the trip service to query trips
+- osrmNearest() uses the nearest service to query the nearest point on the street network
+- osrmIsochrone() and osrmIsodistance() use multiple osrmTable() calls to create isochrones or isodistances polygons
+
+
+
+```{r osmr}
+
+## Then we use osrmTable to get the travel time form any market to each other
+## and we get the travel_time matrix that is 30 x 30 because there are 30 markets
+
+market_hub_sf <- st_as_sf(market_hub_sf)
+travel_time <- osrmTable(loc = market_hub_sf)
+
+print(travel_time)
+
+## we set to NA the diagonal of the durations matrix 
+
+diag(travel_time$durations) <- NA
+
+
+## Then we compute the median 
+
+median(travel_time$durations, na.rm = TRUE)
+
+
+```
+So the median time needed to access any market from any other market is 10.1 minutes.
+
+
+But we still want to know the shortest way to go to the market from the office. 
+
+```{r route}
+
+distance_matrix <- osrmTable(osrm_conn, 
+                              hub_sf,
+                              market_sf)
+
+
+durations <- distance_matrix$durations
+
+print(durations)
+
+
+
+diag(durations) <- NA
+
+shortest_duration <- apply(durations, 1, min, na.rm = TRUE)
+
+print(shortest_duration)
+
+## we then can visualize the nearest market that have 0 minutes of distance so id == 13 and id == 15
+
+
+near_market <- market_sf |>
+  filter(id == 13 | id == 15)
+
+print(near_market$strasse)
+
+# the two markets are "Münchener Platz" . "Altmarkt" 
+
+ggplot() +
+  geom_sf(data=dresden, colour="grey")+
+  geom_sf(data=area_tram_sf, colour="blue")+
+  geom_sf(data=near_market, colour="red")+
+  geom_sf(data = hub_sf,aes(fill = "Helmholtzstraße 10, 01069 Dresden"), color = "yellow") +
+  theme_minimal()
+
+```
+
+
+Let´s zoom in, to do it we can buffer around the center of the city
+to find the center of the city we can use the st_centroid function from the sf package that gives us the center of a polygon.
+
+Then we use st_buffer to build a circle around the centroid and crop only that area to visualize more in detail.
+
+```{r centroid, warning = FALSE}
+
+## using the center of the area covered by trams 
+
+center <- st_centroid(area_tram_sf)
+
+# Create a buffer around the centroid
+
+buffer_distance <- 8000 # in meters
+buffered_area <- st_buffer(center, dist = buffer_distance)
+
+
+
+ggplot() +
+  geom_sf(data=buffered_area, colour="darkgreen")+
+  geom_sf(data=market_sf, colour="red")+
+  geom_sf(data = hub_sf,aes(fill = "Helmholtzstraße 10, 01069 Dresden"), color = "yellow") +
+  labs(fill="")+
+  theme_minimal()
+
+
+```
+
+
+We can compute the shortest path to Alaunplatz market from the office using osrmRoute():
+
+
+```{r path, warning = FALSE}
+
+
+## take location of alaun platz from the market street
+
+alaun_platz <- market_sf |>
+filter(strasse == "Alaunplatz")
+
+route <- osrmRoute(src = hub_sf , dst = alaun_platz)
+
+##let´s plot the route object 
+
+plot(st_geometry(route))
+plot(st_geometry(hub_sf), pch = 20, add = T, cex = 1.5)
+plot(st_geometry(alaun_platz), pch = 20, add = T, cex = 1.5)
+
+
+str(route) ## is a LINESTRING
+
+
+## and now look at it intoour city ggplot map
+
+
+
+ggplot() +
+  geom_sf(data=buffered_area, colour="darkgreen")+
+  geom_sf(data=market_sf, colour="red")+
+  geom_sf(data = hub_sf,aes(fill = "Helmholtzstraße 10, 01069 Dresden"), color = "yellow") +
+  geom_sf(data = route,aes(fill = "shortest way to Alaunplatz"), color = "green") +
+  labs(fill="")+
+  theme_minimal()
+
+
+## we can also check how the shortest route compare with the tram lines 
+
+
+ggplot() +
+  geom_sf(data=buffered_area, colour="darkgreen")+
+  geom_sf(data=market_sf, colour="red")+
+  geom_sf(data=tram_sf, colour= "blue")+
+  geom_sf(data = hub_sf,aes(fill = "Helmholtzstraße 10, 01069 Dresden"), color = "yellow") +
+  geom_sf(data = route,aes(fill = "shortest way to Alaunplatz"), color = "green") +
+  labs(fill="")+
+  theme_minimal()
+
+
+
+
+```
+
+It is visible how the shortest route is a tram line, let´s discover which one.
+
+We can use a spatial join to find spatial matches between the coordinates of the LINESTRING object 
+
+
+```{r join, warning = FALSE}
+
+## use st_intersection()
+
+
+
+intersection <- st_intersection(route, tram_sf)
+
+
+## we can look at the structure of the output data from the intersection function 
+
+
+
+table(intersection$strasse)
+
+
+## and vizualize it in our plot
+
+
+ggplot() +
+  geom_sf(data=buffered_area, colour="darkgreen")+
+  geom_sf(data=market_sf, colour="red")+
+  geom_sf(data=tram_sf, colour= "blue")+
+  geom_sf(data = hub_sf, color = "yellow") +
+  geom_sf(data = route, color = "green") +
+  geom_sf(data = intersection,aes(fill = "tram line -route intersection"), show.legend = "point", color = "pink") +
+  labs(fill="")+
+  theme_minimal()
+
+
+
+
+```
+
+
+##### Solving the salesman problem
+
+If a vendor wants to visit all the markets and want to know which is the shortest path to go through all then we can help the vendor with osrmTrip()
+
+
+```{r trips, warning = FALSE}
+
+
+(trips <- osrmTrip(loc = market_sf[1:15, ], overview = "full"))
+
+## It would take 55.2334 meters and 100.3767 minutes
+
+## To plot it we can use plot function 
+
+
+mytrip <- trips[[1]]$trip
+# Display the trip
+plot(st_geometry(mytrip), col = c("black", "grey"), lwd = 2)
+plot(st_geometry(market_sf[1:15, ]), cex = 1.3, pch = 21, add = TRUE)
+text(st_coordinates(market_sf[1:15, ]), labels = row.names(market_sf[1:15, ]), 
+     pos = 1)
+
+
+## or ggplot 
+
+
+market_tr <- as.data.frame(st_coordinates(market_sf)) |>
+  tibble::rownames_to_column("market_number")
+
+mytrip_df <- st_as_sf(mytrip) %>% st_sf()
+
+sales_man <- ggplot() +
+  geom_sf(data = buffered_area, color = "lightgrey") +
+  geom_sf(data = tram_sf, color = "lightblue") +
+  geom_sf(data = mytrip_df, color = "white", lwd = 1) +
+  geom_sf(data = market_sf, aes(color = "Market Points"), size = 2, shape = 21, fill = "salmon") +
+  geom_text_repel(data = market_tr, aes(x = X, y = Y, label = market_number), size = 2, vjust =1, color = "black", family = "Arial")+
+  scale_color_manual(values = "black") +
+  labs(fill = "", colour = "") +
+  theme_void() +
+  theme(legend.position = "bottom") +
+  annotation_scale(
+    aes(style = "ticks", location = "br"), 
+    text_col = "#999999",
+    line_col = "#999999"
+  )
+
+  
+ market_plot <- market_sf %>% 
+   as.data.frame() %>% 
+   dplyr::select(strasse, id) 
+ 
+ 
+ print(sales_man)
+
+ print(market_plot)
+
+```
+
+
+
+
+
+
+

@@ -1,0 +1,543 @@
+---
+title: 'Exercise 3 : raster data, basic operations and extractions'
+output: html_document
+date: "2024-03-06"
+---
+
+### Key packages
+
+-   Geo-computations : sf, terra, raster , ncdf4, exactextractr, rgdgal
+-   Plotting : ggplot2, ggrepel, gridExtra, ggspatial, grid
+-   Geocoding : tidygeocoder
+-   R Project management: here
+-   Generic data wrangling : dplyr, tidyr
+-   Map of the world : rnaturalearth and rnaturalearth
+-   Country and admin names : countrycode
+-   Open street maps : osrm
+
+```{r setup, include=FALSE}
+
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  rnaturalearth,
+ rnaturalearthdata,
+ exactextractr,
+ ncdf4,
+ grid,
+ ggspatial,
+ gridExtra,
+ ggrepel,
+ tidygeocoder,
+ rgdal,
+ osrm ,
+  here,
+  terra,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_3.Rmd")
+
+```
+
+In this exercise class we will look at sources for Raster data online, their format and how to crop them to our area of interest and obtain interesting statistics to visualize insights from the data.
+
+# OPENING RASTER DATA
+
+#### Firstly we start by using one of the most common raster data for economists: night time lights
+
+There are many ways to measure the intensity of light at night and it is used as a proxy for GDP in the recent empirical economics literature.
+
+When choosing data to download is important to consider :
+
+-   Extent : which parts of the word are covered
+-   Resolution : how big is each pixel, so how much of the word is each single grid cell representing
+-   Frequency : how frequently this data have been collected, once a year, month, day ...
+-   Image tool : which type of satellite has been used (eg. VIIRS-DNB : Visible Infrared Imaging Radiometer Suite - Day/Night Band)
+
+For data on global climate or environmental phenomena going on the Global Hydrometereological Center of NASA website is always a good idea :
+
+<https://search.earthdata.nasa.gov/search>
+
+Another important thing to consider is the format of the raster data the files are gonna come as:
+
+-   .tif - GeoTiff
+
+-   .nc - NetCDF
+
+-   .grib
+
+    and many other obscure acronyms, but terra package can deal with most of them, if you encounter strange raster formats try to use rast()
+
+and many others, if you can choose the Geotif (.tif) are those relatively easier to deal with.
+
+We are also going to use data on population density always from NASA Satellite but this time taken from the Socio Economic Data and Application Center (SEDAC) website:
+
+<https://sedac.ciesin.columbia.edu/data/set/gpw-v4-population-density-adjusted-to-2015-unwpp-country-totals-rev11/data-download>
+
+To deal with the night time lights we will use the ncdf4 package where :
+
+-   nc_open : opens the file
+-   ncvar_get : get variables
+
+Here will deal with basics of opening and working with nc but to get a hands on guide give a look to : <https://rpubs.com/boyerag/297592>
+
+or to the blog post from my colleague Sarah :
+
+<https://sarahzeller.github.io/blog/posts/opening-nc-files/>.
+
+```{r open}
+
+
+#### NIGHTLIGHT DATA
+
+## open night light that is stored as a NetCDF
+
+nl_15 <- nc_open(here("data","raw","raster","night_light_15.nc"))
+
+
+## the first step is to print the "nc dump" that contains all the info on the file structure
+
+print(nl_15)
+
+## then we extract to vectors the three dimensions (longitude, latitude and time)
+
+lon <- ncvar_get(nl_15, "Longitude")
+lat <- ncvar_get(nl_15, "Latitude", verbose = F)
+day <- ncvar_get(nl_15, "Day_of_year")
+
+
+## now we extract the values of the variable copying the name from the nc dump 
+
+light.array <- ncvar_get(nl_15, "HRAC_COM_FR")
+
+## now check the dimensions to see if we have 365 days, and then 720-360 for lon-lat
+
+dim(light.array) 
+
+## now check for NAs and replace whatever placeholder was used in the data with plain NA
+
+fillvalue <- ncatt_get(nl_15, "HRAC_COM_FR", "_FillValue")
+
+light.array[light.array == fillvalue$value] <- NA
+
+
+## close nc file 
+
+nc_close(nl_15)
+
+
+
+## we are interested in the first day of the year and for us the first dimension is the day we have seen so let´s slice to get only first day (alternatively we could also compute the mean across them)
+
+light.slice <- light.array[1 , ,] 
+
+
+## now check that we are left only with two dimensions 
+
+dim(light.slice)
+
+## now is time to get a raster out of this 
+
+night <- raster(t(light.slice), xmn=min(lon), xmx=max(lon), ymn=min(lat), ymx=max(lat), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+
+
+
+## now we plot it to see if the coordinates are oriented correctly
+
+plot(night)  ### ok it seems flipped so we do 
+
+
+night <- flip(night, direction='y') ##to be sure if you need to flip x or y direction just try and you will see
+
+night<- projectRaster(night, crs = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0")
+
+
+
+#writeRaster(night, here("data","tmp","night_light_world.tiff"))
+#### POPULATION DATA
+
+## open population data from SEDAC that is stored as a GeoTiff
+
+pop <- raster(here("data","raw","raster","sedac_pop_2000.TIFF"))
+
+
+## check the crs 
+
+crs(night)
+crs(pop)
+
+## sanity check plots 
+
+
+plot(pop)
+plot(night)
+
+
+## we open also the word borders as a vector to have some maps of reference for plots 
+
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+
+```
+
+# MANIPULATING RASTER DATA
+
+## Cropping rasters
+
+A very common task if too need to crop your raster data to a specific area. So now we will crop both population and night lights to the extent of Italy.
+
+```{r crop}
+
+## First we take the word_map and keep only the shape of Germany 
+
+ita_map <- world_map |>
+  filter(sovereignt == "Italy")
+
+## now we create a box around the germany map 
+
+ita_box <- st_bbox(ita_map)
+
+
+## now we can use the crop function 
+
+ita_light <- crop(night,ita_map)   
+ita_pop <- crop(pop,ita_map)  
+
+# it would work also if the raster object was a spatial raster from terra instead, or if instead of a bbox object we had a normal sf object on the second argument.
+
+
+## let´s plot vector and raster to see if the images make sense 
+
+plot(ita_light)
+
+ggplot()+
+  geom_sf(data = ita_map)
+
+
+```
+
+## Masking rasters
+
+Instead of cropping we can mask the raster. The difference is that the cropping is effectively deleting all the information not contained within the geometry extent of the second argument while masking will keep all the information but set to 0 the values for outside the extent indicated by the reference object.
+
+```{r mask}
+
+## To use mask the second object should be an sf object so we cannot use directly the bbox we should convert it to a an sf object or we can use directly the ita_map
+
+ita_mask <- mask(ita_light, ita_map)
+ita_pop_mask <- mask(ita_pop, ita_map)
+plot(ita_mask)
+
+```
+
+Comparing masking and cropping operations you can see that the masking is producing a more clear picture because you can see exactly which grid cells /tiles are within the geometry
+
+But it could be less convenient if you start from the world map:
+
+```{r remask}
+
+
+ita_tot_mask <- mask(night, ita_map)
+
+plot(ita_tot_mask)
+
+```
+
+As you see above italy is small and the rest of the world is not erased but just set to 0. So ideally you first crop on a bbox and then you mask to get a more clean picture.
+
+## Resampling rasters
+
+Now one important note is that rasters come at different resolutions. Let´s look at the one of our two night light and population rasters.
+
+```{r resolution}
+res(ita_mask)
+res(ita_pop_mask)
+
+plot(ita_mask)
+plot(ita_pop_mask)
+
+```
+
+As you can see the first raster is bigger than the second and this can be seen by the resolution number (0.5 versus 0.1) but also visually from the maps.
+
+Ideally we always want more precise information so smaller grid, but this is not always possible and it is very likely that you will need to work in the same project with rasters with different resolutions.
+
+To deal with this you can resample the raster to homogenize the resolution. You can go from the smaller to the bigger safely but you will loose data quality if you go from a bigger raster to a smaller resample.
+
+```{r resample}
+
+## We start by making the population data have cells as big as the one of the night lights
+
+resampled_ita_pop <- resample(ita_pop_mask, ita_mask, method="bilinear")
+
+## now we check for the resolution 
+
+res(resampled_ita_pop)
+
+plot(resampled_ita_pop)
+plot(ita_pop_mask)
+
+
+```
+
+So now we have night lights and population at the same resolution. The method we used is bilinear, so to put cells together or add new cells if we are creating a smaller resolution the algorithm behind the function will take the neighbouring cells and average between them.
+
+## Aggregating and Disaggregating rasters
+
+Another strategy that can be used to reduce the number of cells or get a value for an entire area is to aggregate the raster into bigger units.
+
+```{r aggregate}
+
+agg_ita_pop <- aggregate(ita_pop_mask, fact = 5, fun=mean, expand=TRUE, na.rm=TRUE)
+
+## now i used a factor of 5 so from 0.1 x 5 we should get an image similar to the previous one resampling
+
+plot(agg_ita_pop)
+
+# We can also use a bigger aggregation factor 
+
+reagg_ita_pop <- aggregate(ita_pop_mask, fact = 10, fun=mean, expand=TRUE, na.rm=TRUE)
+
+
+plot(reagg_ita_pop)
+
+
+# Or a smaller one 
+
+
+deagg_ita_pop <- aggregate(ita_pop_mask, fact = 2, fun=mean, expand=TRUE, na.rm=TRUE)
+
+
+plot(deagg_ita_pop)
+
+```
+
+Now if we want to disaggregate, so go to smaller cells, we can do it with the disaggregate function and we need to specify again the factor and the method, so again we will use bilinear so that values are locally interpolated and we introduce the smallest amount possile of measurement error.
+
+```{r disaggregate}
+
+smaller_pop <- disaggregate(ita_pop_mask, fact=2, method='bilinear')
+
+plot(smaller_pop)
+
+
+```
+
+The smaller we get the nicer it looks in visualizations but also the less precise it is if we are starting from a larger raster, keep this trade-off in mind.
+
+# RASTER to RASTER OPERATIONS
+
+## Putting one raster on top of the other : overlaying
+
+Now we have the population and the night time lights at the same resolution, we can put them one on top of the other. For example we might want the amount of nihgt lights divided by the population.
+
+We can do this with the \*\* overlay \*\* function from the raster package.
+
+```{r overlaying}
+
+
+pop_night <- overlay(ita_mask, resampled_ita_pop, fun=function(x,y) x/y)
+
+plot(pop_night)
+
+```
+
+Another way to handle operations across raster layers is to use more advanced types of rasters objects called : raster brick and raster stacks that we will cover in the 5th class in some weeks, they allow you to work with multiple layers all at the same time in one object and do operations across them.
+
+# RASTER to VECTOR OPERATIONS
+
+## Extracting values from rasters
+
+Many times what we really want is to know from these satellite images how much is the total or mean value across pixels for one specific geographic unit.
+
+### We can extract the values from a raster to the extent of another spatial object using extract or exact_extract functions and package
+
+Let´s take the Italian administrative units (NUTS 2) shapefile (downloaded as the one we used last week for Germany) and compute the mean night light for each municipality and visualize it.
+
+```{r extracting}
+
+##open shape file 
+ita_2 <- st_read(here("data","raw", "gadm41_ITA_shp", "gadm41_ITA_2.shp"))
+
+##crop and then mask the raster of night light as we learnt above
+
+ita_night <- crop(night, ita_2)
+ita_mask <- mask(ita_night, ita_2)  ## this might take a while
+
+## Now we can extract 
+
+values <- exact_extract(ita_mask, ita_2, 'sum')
+
+
+## the function is returning a vector and we can assign it to a column in our shapefile so that later is easier to plot and in general you can do this with the dataset you will use for e.g. for regressions
+
+ita_2$mean_light <- values
+
+## let´s look at the distribution of the lights first 
+hist(ita_2$mean_light)  ## looks legit we can plot it 
+
+ita_night_plot <- ggplot() +
+  geom_sf(data = ita_2, aes(fill = mean_light)) + 
+  scale_fill_viridis_c() + 
+  theme_minimal() +
+  labs(title = "Mean Night Light Intensity by Italian NUTS 2")
+
+print(ita_night_plot)
+
+
+```
+
+There are many more advance feature of the exact_extract function, for eg. is possible to compute multiple statistics at the same time and store then automatically in a dataframe or to weight the statistic for the precise share of raster cells covered by the polygons (to adjust for the bias coming from cells that are half in and half out of the geometry).
+
+There is also a default raster::extract where you can do similar operations but it is more commonly used for raster to raster operations.
+
+
+
+# For when you want switch from rasters to vectors and viceversa
+
+## From vector to raster : rasterization
+
+There are ways to go from vectors to raster and viceversa. They can be quite time consuming and are most of the time not the best choice. Although they can be really necessary in some situations.
+
+All the parts of the sfc features can be potentially rasterized, there can be line rasterization, point rasterization and full polygons rasterization.
+
+```{r rasterize}
+
+## We start from the ita_2 data and we make them a  raster using as a template the masked population raster
+
+rast_ita_2 <- rasterize(ita_2, ita_pop_mask)
+
+plot(rast_ita_2)
+str(rast_ita_2)
+
+
+
+
+```
+
+## From raster to vector : spatial vectorization
+
+```{r spvectorize}
+
+# Here we start from the ita_pop_mask and we make it a polygon 
+
+diss_poly_pop <- rasterToPolygons(ita_pop_mask, dissolve = TRUE)
+poly_pop <- rasterToPolygons(ita_pop_mask, dissolve = FALSE)
+
+plot(diss_poly_pop)
+plot(poly_pop)
+
+```
+
+
+# SPATIAL OPERATIONS TO GET RASTER INSIGHTS
+
+- st_buffer()
+- st_centroid()
+- st_distance()
+- st_area()
+
+Now that we can use rasters and vectors at the same time many interesting things are possible.
+
+We will try to get insights on the population distribution around province centers using our  0.1 x 0.1 degrees raster cells data each containing information on ~ 11.1 km.
+
+STEP 1 : Open Italy nuts 3 shapefile and compute the centroid of each province using the st_centroid() function.
+
+
+```{r centroid}
+
+ita_3 <- st_read(here("data","raw", "gadm41_ITA_shp", "gadm41_ITA_3.shp"))
+
+
+## now we select sicily 
+
+sicily <- ita_3 |>
+  filter(NAME_1 == "Sicily")
+
+## let´s zoom in little and do it with one province
+
+
+ messina <- ita_3 |>
+  filter(NAME_2 == "Messina")
+
+
+ messina_centers <- st_centroid(messina)
+ 
+ 
+ ggplot()+
+  geom_sf(data=messina) +
+  geom_sf(data=messina_centers)
+ 
+ 
+ 
+ #It is visible how some of the centers are not really inside of the polygons, especially for islands, we can correct for that using st_point_on_surface()  function instead of st_centroids
+ 
+ 
+re_messina_centers <- st_point_on_surface(messina)
+ 
+ ggplot()+
+  geom_sf(data=messina) +
+  geom_sf(data=re_messina_centers)
+ 
+ 
+ ## now we can generalize for all Italy
+ 
+ita_centers <- st_point_on_surface(ita_3)
+ 
+
+```
+
+
+STEP 2: Create a buffer around the centroids of 2 kilometers and extract values from the ita_pop_mask raster dataset for geometries of centroids + buffers 
+
+
+```{r bufferpop}
+
+# define 2km buffer distance
+buffer_distance <- 2000
+
+# use st_buffer function from the sf package to create buffer around centroids
+centers_buffer <- st_buffer(ita_centers, dist = buffer_distance)
+
+# Extract values from hte centers raster dataset for centroids + buffers
+
+pop_centers <- exact_extract(ita_pop_mask, centers_buffer, fun = "sum")
+
+# Extract values for all NUTS 3 using the initial shapefile as extent
+
+pop_tot <- exact_extract(ita_pop_mask, ita_3,  fun = "sum")
+
+# Assign the extracted values
+
+ita_3$non_center_pop  <- pop_tot - pop_centers
+
+ita_3$center_pop <- pop_centers
+
+
+#plot
+
+
+ggplot() +
+  geom_sf(data = ita_3, aes(fill = center_pop), color= NA) +
+  labs(title = "Pop around Province center") +
+  theme_minimal()+
+  scale_fill_viridis_c()
+
+
+ggplot() +
+  geom_sf(data = ita_3, aes(fill = non_center_pop), color= NA) +
+  labs(title = "Pop not around Province center") +
+  theme_minimal()+
+  scale_fill_viridis_c()
+
+
+
+
+```
+
+
