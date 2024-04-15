@@ -1,0 +1,671 @@
+---
+title: "Exercise 5: Multiple rasters structures, stars and geo-data visualization"
+author: "Marta Bernardi"
+date: "2024-04-05"
+output: html_document
+---
+
+### Key packages
+
+-   Geo-computations : sf, terra, raster , ncdf4, exactextractr, rgdgal , stars
+-   Geocoding : tidygeocoder
+-   R Project management: here
+-   Generic data wrangling : dplyr, tidyr, textreadr
+-   Map of the world : rnaturalearth, rnaturalearthdata, elevatr, rnaturalearthhires
+-   Country and admin names : countrycode
+-   Open street maps : osrm
+-   Static and Interactive Maps: tmap, leaflet, mapview, parallelMap, ggplot2, ggrepel, gridExtra, gifski, ggspatial, grid, cartogram
+-   API data access: ecmwfr
+
+```{r setup, include=FALSE}
+
+library(pacman)
+
+pacman::p_load(
+  rnaturalearthhires,
+  ggplot2,
+  ecmwfr,
+  cartogram,
+  stars,
+  dplyr,
+  RSAGA,
+  sf,
+  raster,
+  rnaturalearth,
+  textreadr,
+ rnaturalearthdata,
+ exactextractr,
+ ncdf4,
+ grid,
+ ggspatial,
+ gridExtra,
+elevatr,
+ ggrepel,
+ tidygeocoder,
+ rgdal,
+ osrm ,
+  here,
+  terra,
+  tidyr,
+tmap, 
+parallelMap,
+leaflet,
+gifski,
+mapview
+)
+
+here::i_am("exercises_code/ex_5.Rmd")
+
+```
+
+In the first part of this class we will see more complex raster objects composed by multiple layers and how to handle multilayer operations. Then we will see stars objects and how to manage more multidimensional geographical data.
+
+# Multiple raster layers at once
+
+We can create data objects that contain multiple raster layers one on top of each other.
+
+It is possible both to do operations that involve multiple layers at the same time, like cross-layer computations or do operations that involve single layers that we call from the brick object.
+
+We will use data on monhtly precipitation from :<https://downloads.psl.noaa.gov/Datasets/cmap/enh/>
+
+Here each year from 1991 to 2020 they took data each month on the amount of precipitation and the data that we use here report the mean for each month.
+
+## Raster Bricks
+
+Ratser bricks are typically single multi-layer files . So all the layers that we have at the start are stored in one multi-layer object. This makes processing more efficient that with ratser stacks and this is the reason for which all the bricks and stacks oeprations give as a result a brick.
+
+```{r bricks}
+
+##open the netcdf raster and extract values
+
+rain <- nc_open(here("data","raw","raster", "precip.mon.ltm.1991-2020.nc"))
+
+print(rain)
+
+lon <- ncvar_get(rain, "lon")
+lat <- ncvar_get(rain, "lat", verbose = F)
+time <- ncvar_get(rain, "time")
+
+rain_mean <- ncvar_get(rain, "precip")
+
+dim(rain_mean) 
+
+fillvalue <- ncatt_get(rain, "precip", "_FillValue")
+
+rain_mean[rain_mean == fillvalue$value] <- NA
+
+nc_close(rain)
+
+### fix the time dimension to report clearly the month of the year
+
+reference_date <- as.POSIXct("1800-01-01 00:00:0.0", tz = "UTC")
+time_values <- as.POSIXct(reference_date + time*3600, tz = "UTC")
+
+print(time_values)
+
+month_values <- format(time_values, "%m")
+
+print(month_values)
+
+
+## now put observations from each month in a different layer and then make a brick out of it 
+
+
+dim(rain_mean)
+
+
+nins <- 1:12
+rain_rasters <- list()
+
+for (n in nins) {
+  rain_slice <- rain_mean[, , n]
+  rain_rasters[[n]] <- raster(t(rain_slice), xmn=min(lon), xmx=max(lon), ymn=min(lat), ymx=max(lat), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0"))
+}
+
+## now let´s extract January, April, August and October one month per season and make a raster brick out of it 
+
+
+jan_rain <- rain_rasters[[1]]
+  
+april_rain <- rain_rasters[[4]]
+  
+august_rain <- rain_rasters[[8]]
+  
+october_rain <- rain_rasters[[10]]
+
+
+writeRaster(jan_rain, here("data","tmp","january_rain.tif"))
+
+## plotting for sanity checks 
+
+
+plot(jan_rain)
+crs(jan_rain)
+
+
+## now we put it in a brick 
+
+rain_seasons <- brick(jan_rain, april_rain, august_rain, october_rain)
+
+str(rain_seasons)
+
+## and we can access with [[]] each single raster layer within the brick
+
+plot(rain_seasons[[2]])
+
+```
+
+## Bricks Operations
+
+1- If we have one brick with layers having all the same extent we can do : **Multi-layer object multiplication without recycling** and the operation is performed on each layer separately.
+
+2- **Element wise** operations where a vectorof values is provided and then is recycled for each layer of the brick
+
+3- **Cell values operations** between bricks and between bricks and other separate Raster layers
+
+```{r brickoperations}
+
+
+#################### 1 - Multilayer operation
+
+rain_multi <- rain_seasons * 100 
+
+# let´s also assign month names to the layers 
+
+names(rain_seasons) <- c("January", "April", "August", "October")
+
+plot(rain_seasons)
+
+
+
+#################### 2 - Element wise operation 
+
+
+mod_rain <- rain_seasons + c(1,5,10)
+
+
+#Here, a vector of length 3 (c(1, 5, 10)) is added to each layer of the RasterBrick on rain seasons. The vector is recycled (repeated) for each layer in the brick, applying the addition operation element-wise.
+
+plot(mod_rain)
+
+################# 3- Cell values operations between bricks and with raster layers
+
+sum_rain <- rain_seasons + mod_rain
+
+hist(sum_rain)
+
+#If the two RasterBricks have different numbers of layers, recycling will occur. The shorter object will be repeated to match the length of the longer one.
+
+
+# now we add September 
+
+mix_rain <- rain_seasons + rain_rasters[[9]] + mod_rain
+
+
+#Recycling occurs with the RasterLayer r1, meaning its values will be repeated to match the dimensions of the RasterBricks. The operation is then performed element-wise between corresponding cells of the layers.
+
+
+### In general we can always drop or add a specific layer 
+
+rain_seasons_add <- addLayer(rain_seasons,  rain_rasters[[9]])
+
+##and then remove it 
+
+rain_seasons_cut <- dropLayer(rain_seasons_add, 5)
+
+
+## these same add and drop functions are valid also for the raster stacks
+```
+
+## Raster Stacks
+
+Raster stacks can virtually connect several RasterLayer objects in memory and allow pixel-based calculations on separate raster layers. To look at Raster Stack we we will take data from ECMWFR: <https://github.com/bluegreen-labs/ecmwfr>
+
+This is a very common operation: to use APIs to connect to databases to call for data.
+
+```{r stacks}
+
+## save our request from the website in a list 
+
+request <- list(
+  "dataset_short_name" = "satellite-fire-burned-area",
+  "format" = "zip",
+  "origin" = "esa_cci",
+  "sensor" = "modis",
+  "variable" = "grid_variables",
+  "version" = "5_0cds",
+  "year" = "2001",
+  "month" = c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"),
+  "nominal_day" = "07",
+  "target" = "fire_areas"
+)
+
+## input login info 
+
+wf_set_key(user = "280317",
+            key = "b7d7bd0d-7190-4e5e-8cf0-79642b2501da",
+            service = "cds")
+
+
+file <- wf_request(
+ user     = "280317",   # user ID (for authentification)
+ request  = request,  # the request
+ transfer = TRUE,     # download the file
+ path     = here("data", "raw", "raster")       
+ )
+
+
+## now we can open the file 
+
+dir.create(here("data", "raw", "raster", "fire_months"))
+unzip(here("data", "raw", "raster", "fire_areas"), exdir = here("data", "raw", "raster", "fire_months"))
+
+folder_path <- here("data", "raw", "raster", "fire_months")
+
+# List all files in the folder
+
+file_names <- list.files(folder_path, full.names = TRUE)
+
+# Create an empty list to store stars objects
+
+fire_list <- list()
+
+
+for (file in file_names) {
+  
+  month <- substr(basename(file), 5, 6)  # Extract characters 5 and 6 from the file name
+  
+  # Create the corresponding variable name using month.abb
+  
+  month_name <- month.abb[as.numeric(month)]
+  
+  # Read the file into a raster object and store it in the list
+  fire_list[[month_name]] <- raster(file)
+}
+
+fire_stack <- stack(fire_list)
+
+str(fire_stack)
+
+plot(fire_stack)
+
+
+## the data points are small and we should zoom in to get a better idea but the crs appear to be the correct one
+
+
+```
+
+# Stars objects
+
+Stars are Spatiotemporal arrays, with the package stars we can have:
+
+-   Spatial data cubes are arrays with one or more spatial dimensions
+-   Raster data cubes have at least two spatial dimensions that form the raster tesselation
+-   Vector data cubes have at least one spatial dimension that may for instance reflect a polygon tesselation, or a set of point locations.
+
+We will start by creating our own stars object first and then we will open a real data set.
+
+```{r stars1}
+
+
+## first we create a starting matrix 
+
+m = matrix(1:30, nrow = 8, ncol = 5)
+
+## then we specify the dimensions of the objects  (this would be lat and lon in a real dataset)
+
+dim(m) = c(x = 8, y = 5)
+
+## now we use the st_as_star() function to create the star object 
+
+(s = st_as_stars(m))  
+
+# for a detailed descriptions of the properties of the star object sructure look into https://r-spatial.github.io/stars/articles/stars4.html 
+
+
+
+## to plot stars objects we can use the image function from the stars package
+
+image(s, text_values = TRUE, axes = TRUE)
+
+## in this plot we can se that we are going from South to North while usually the coordinate are represented as goign from North to South to we would need to invert te delta of the star obejct -> in this way the matrix will rotate around the origin 
+
+
+attr(s, "dimensions")[[2]]$delta = -1
+
+image(s, text_values = TRUE, axes = TRUE)
+
+
+```
+
+The reason that you might be willing to use the stars package is that neither raster or terra support :
+
+-   non-raster time series,
+-   multi-attribute rasters time series
+-   rasters with mixed type attributes (e.g., numeric, logical, factor, POSIXct)
+-   rectilinear or curvilinear rasters with more than 2 spatial dimensions
+
+Stars is a powerful package because allows us to think in terms of vector cubes:
+
+![](images/better_cube.png){width="553"}
+
+But we can also zoom into a simpler setting with only one cube with 3 dimensions :
+
+![](images/raster_star.png){width="561"}
+
+<https://r-spatial.github.io/stars/>
+
+This is a more advanced topic and you will most likely not work with stars objects in your first project. But is good to know that these kind of objects exists and that most of the raster and terra commands have a stars version <https://github.com/r-spatial/stars/wiki/How-%60raster%60-functions-map-to-%60stars%60-functions> .
+
+In the second part of the lecture we will do some geo-data visulization basics !
+
+# Geo-data visualization basics
+
+# Static maps
+
+The idea is to go beyond basic plot () and ggplot(), even though ggplot does represent the best option most of the time in my opinion. 
+
+
+### From Maps to Cartograms
+
+Firstly I would like to show you the difference between a map and a carthogram. 
+
+You can read more about the cartogram package here:
+
+https://cran.r-project.org/web/packages/cartogram/cartogram.pdf
+
+https://cran.r-project.org/web/packages/cartogram/readme/README.html
+
+But overall the idea is that your map does not "neutrally" represent the shape of the country, instead before plotting you runa  cartogram computation that will modify the geometries according to some attribute that you specify (for us here will be the mean population). This makes the visual more understandable at first sight but is a very biased view on the geographic area per se.
+
+```{r cartogram}
+
+## we extract the data on population in germany by admin 2
+
+pop <- raster(here("data","raw","raster","sedac_pop_2000.TIFF"))
+deu_1 <- st_read(here("data","raw", "gadm41_DEU_shp", "gadm41_DEU_1.shp"))
+deu_pop <- exact_extract(pop, deu_1, fun ="mean")
+deu_1$pop <- deu_pop
+
+
+# then plot it first as a map in ggplot 
+
+ggplot()+
+  geom_sf(data= deu_1, aes(fill = pop))+
+  scale_color_viridis_c()+
+  theme_minimal()
+
+# then we use the cartogram package to  make it a cartogram 
+
+deu_1 <- st_transform(deu_1, "+proj=merc +a=6378137 +b=6378137")
+
+deu_cart <- cartogram_cont(deu_1, "pop", itermax = 5)
+deu_ncart <- cartogram_ncont(deu_1, "pop")
+deu_balls <- cartogram_dorling(deu_1, "pop")
+
+
+ggplot()+
+  geom_sf(data= deu_cart, aes(fill = pop))+
+  scale_color_viridis_c()+
+  theme_minimal()
+
+ggplot()+
+  geom_sf(data= deu_ncart, aes(fill = pop))+
+  scale_color_viridis_c()+
+  theme_minimal()
+
+ggplot()+
+  geom_sf(data= deu_balls, aes(fill = pop))+
+  scale_color_viridis_c()+
+  theme_minimal()
+```
+
+### tmap
+
+```{r tmap}
+
+
+## first with vector data
+
+bavaria <- deu_1 |>
+  filter(VARNAME_1 == "Bavaria")
+
+
+## only the fill 
+tm_shape(bavaria) +
+  tm_fill()
+
+## only the borders
+tm_shape(bavaria) +
+  tm_borders()
+
+##fill and borders
+
+tm_shape(bavaria) +
+  tm_polygons()
+
+
+##then with raster data 
+
+tm_shape(pop) +
+  tm_raster()
+
+
+```
+
+We can also plot multiple objects in the same map in tmap in the same way that we have used in ggplot so far:
+
+```{r multi}
+
+
+bavaria_crop <- crop(pop, bavaria)
+bavaria_pop <- mask(bavaria_crop, bavaria)
+
+bav <- tm_shape(bavaria_pop)+
+  tm_raster()+
+  tm_shape(bavaria)+
+  tm_borders()
+
+## now we can do the same with saxony
+
+saxony <- deu_1 |>
+  filter(VARNAME_1 == "Saxony")
+
+
+saxony_crop <- crop(pop, saxony)
+saxony_pop <- mask(saxony_crop, saxony)
+
+sax <- tm_shape(saxony_pop)+
+  tm_raster()+
+  tm_shape(saxony)+
+  tm_borders()
+
+
+# and then arrange the two plots together 
+
+tmap_arrange(bav, sax, ncol = 2)
+
+# we can change the filling color and the transparency (alpha)
+
+tm_shape(saxony)+
+  tm_fill(col = "aquamarine",alpha = 0.5)
+
+# we can also change how tick the borderlines are 
+
+tm_shape(deu_1)+
+  tm_polygons(col = "darkgreen", border.alpha = 0.5, lwd = 1, border.col = "black")
+
+
+```
+
+We can also color the geographical units on the base of a value for eg the population :
+
+```{r coor}
+
+
+ tm_shape(deu_1) +
+  tm_polygons(col = "pop", midpoint = 0)
+ 
+ 
+## we can also color based on customized breaks 
+ 
+ 
+ tm_shape(deu_1) +
+  tm_polygons(col = "pop", n = 3)
+ 
+ #or 
+ 
+ 
+ 
+ summary(deu_1$pop)
+ 
+ tm_shape(deu_1) +
+  tm_polygons(col = "pop", breaks =  c(120, 130, 150, 215))
+ 
+ 
+ ## to do this we can also use the styl argument that contains pre coded nice ways of making break given your data distribution
+ 
+ tm_shape(deu_1) +
+  tm_polygons(col = "pop", style ="pretty")   # try "quantile", "equal" ....
+ 
+ ## like in ggplot we can apply a palette 
+ 
+ tm_shape(deu_1) +
+  tm_polygons(col = "pop", style ="pretty", palette = "viridis") 
+ 
+ ## and we can fix the layout of the plot 
+ 
+tm_shape(deu_1) +
+  tm_polygons(col = "pop", style ="pretty", palette = "viridis")+ 
+  tm_layout(title = "German population", frame.lwd = 3, legend.position = c("left", "bottom"),inner.margins = 0.2)
+  
+# there is also a legend.show = FALSE optionif you just do not want the legend
+  
+```
+
+In general is usefull to distinguish between three main types of palettes:
+
+![](images/Screenshot%202024-04-15%20at%2011-09-01%202%20tmap%20Making%20Maps%20with%20R.png)
+
+1 - Sequential palettes that go from dark to light
+
+2- Diverging palettes
+
+3- Categorical palettes
+
+There are also default ways to style your plot with tm_styles that is very similar to ggplot theme\_:
+
+```{r styles}
+
+tm_shape(deu_1) +
+  tm_polygons(col = "pop", style ="pretty", palette = "viridis")+ 
+  tm_style("classic")+
+  tm_layout(title = "German population", frame.lwd = 3, legend.position = c("left", "bottom"),inner.margins = 0.2)
+
+
+## or color blind which is always a very clean and accessible choice that is using viridis most of the times
+
+tm_shape(deu_1) +
+  tm_polygons(col = "pop", style ="pretty", palette = "viridis")+ 
+  tm_style("col_blind")+
+  tm_layout(title = "German population", frame.lwd = 3, legend.position = c("left", "bottom"),inner.margins = 0.2)
+
+```
+
+We can also plot grids with multiple images or animate a map that is evolving through time :
+
+```{r animate}
+
+## now we use our rain rasters for the months 
+
+jan <- exact_extract(jan_rain, deu_1, fun= "mean")
+april <- exact_extract(april_rain, deu_1, fun= "mean")
+august <- exact_extract(august_rain, deu_1, fun = "mean")
+october <- exact_extract(october_rain, deu_1, fun = "mean")
+
+
+deu_1$jan_rain <- jan 
+deu_1$april_rain <- april
+deu_1$august_rain <- august 
+deu_1$october_rain <- october
+
+
+deu_1 <- deu_1 |>
+  dplyr::select(NAME_1, geometry, pop, jan_rain, august_rain, april_rain, october_rain)
+
+deu_reshaped <- gather(deu_1, month, rain, jan_rain:october_rain)
+deu_reshaped$month <- gsub("_rain", "", deu_reshaped$month)
+
+
+head(deu_reshaped)
+
+
+## first we look at them as a grid 
+
+tm_shape(deu_reshaped) +
+  tm_polygons(
+    col = "rain",
+    style = "cont",
+    palette = "viridis",
+    title = "Mean rain"
+    ) +
+  tm_facets(by = "month", ncol = 2) +
+  tm_layout(legend.outside.size = 0.2)
+
+
+## Or we can have a small animation using the gifski options
+
+rain_animation <- tm_shape(deu_reshaped) +
+  tm_polygons(
+    col = "rain",
+    style = "cont",
+    pal = "viridis"
+    ) +
+  tm_facets(along = "month") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+tmap_animation(
+ rain_animation, filename = "rain.gif",
+  delay = 50, width = 2400, height = 1200
+  )
+
+tmap_animation(rain_animation)
+
+
+
+```
+
+# Interactive maps
+
+We can do interactive maps with tmap
+
+```{r interactive}
+
+## we can take the world map 
+
+world_map <- ne_states(returnclass = "sf")
+
+pop_values <- exact_extract(pop, world_map, fun = "mean")
+
+
+world_map$pop <- pop_values
+
+world_map <-st_make_valid(world_map)
+
+tmap_mode("view")
+tm_shape(world_map) + tm_polygons(col = "pop", midpoint = 0)
+
+```
+
+tmap is using leaflet to produce interactive maps but if you are interested in interactive visualizations you should check out:
+
+- **Leaflet** is a Java script based language that you can implement in R and also tmap is based on it
+https://bookdown.org/nicohahn/making_maps_with_r5/docs/leaflet.html
+
+- **Mapview** is very similar to tmaps but focused on interactive maps
+https://r-spatial.github.io/mapview/index.html 
+
+
+
+
+
