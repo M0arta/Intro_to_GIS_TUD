@@ -1,0 +1,616 @@
+---
+title: 'Exercise 4 : Rasters and Vectors together in action'
+author: "Marta Bernardi"
+date: "2024-04-03"
+output: html_document
+---
+
+### Key packages
+
+-   Geo-computations : sf, terra, raster , ncdf4, exactextractr, rgdgal
+-   Plotting : ggplot2, ggrepel, gridExtra, ggspatial, grid
+-   Geocoding : tidygeocoder
+-   R Project management: here
+-   Generic data wrangling : dplyr, tidyr
+-   Map of the world : rnaturalearth, rnaturalearthdata, elevatr
+-   Country and admin names : countrycode
+-   Open street maps : osrm
+
+```{r setup, include=FALSE}
+
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  rnaturalearth,
+ rnaturalearthdata,
+ exactextractr,
+ ncdf4,
+ grid,
+ ggspatial,
+ gridExtra,
+elevatr,
+ ggrepel,
+ tidygeocoder,
+ rgdal,
+ osrm ,
+  here,
+  terra,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_4.Rmd")
+
+```
+
+
+First some spatial topological gymnastic to refresh memory on vectors:
+
+
+## 1:  Spatial vector operations
+
+
+##- 1.1: Topological relations : st_within(), st_touches(), st_is_within_distance(), st_disjoint()
+
+
+```{r topological}
+
+# let's create some sample data
+
+polygon1 <- st_polygon(list(rbind(c(0, 0), c(0.5, 0), c(0.5, 0.5), c(0, 0.5), c(0, 0))))
+polygon2 <- st_polygon(list(rbind(c(0.5, 0.5), c(1.5, 0.5), c(0.8, 0.8), c(0.5, 0.8), c(0.5, 0.5))))
+point <- st_point(c(0.5, 0.5))
+
+plot(polygon1, col = "lightblue", main = "Polygon 1")
+plot(point, add = FALSE, col = "red", main = "Point")
+plot(polygon2, col = "lightgreen", main = "Polygon 2")
+
+
+# Check if point is within polygon 1 and/or polygon2
+
+within_result1 <- st_within(point, polygon1)
+within_result2 <- st_within(point, polygon1)
+
+print(within_result1)
+print(within_result2)
+str(within_result1)  
+
+# the result of st_within() is a list that includes the geometries of the first object into the second object 
+
+# Here resulting list contains only a 0 so there is no point geometry within either polygon1 or polygon2
+
+
+# Check if polygon1 touches polygon 2
+# https://postgis.net/docs/ST_Touches.html 
+
+touches_result <- st_touches(polygon1, polygon2)
+
+print(touches_result)
+str(touches_result) 
+
+# the result of st_touches is  both a "sgbp" (sparse geometry binary predicate) and "list", and in this case predicts that the two polygons touch eachothers
+
+
+plot(polygon1, col = "lightblue", main = "Polygons")
+plot(polygon2, col = "lightgreen", add = TRUE)
+
+## adjusting the image size to make both polygons visible in the same picture
+
+bbox <- st_bbox(st_union(polygon1, polygon2))
+
+
+plot(polygon1, col = "lightblue", main = "Polygons", xlim = c(bbox["xmin"], bbox["xmax"]), ylim = c(bbox["ymin"], bbox["ymax"]))
+plot(polygon2, col = "lightgreen", add = TRUE)
+
+
+# Check if point is within a certain distance from polygon 1 and 2
+
+within_distance_result1 <- st_is_within_distance(point, polygon1, dist = 0.5)
+
+within_distance_result2 <- st_is_within_distance(point, polygon2, dist = 0.5)
+
+print(within_distance_result1)
+print(within_distance_result2)
+
+#So both polygons are within 0.5 from the point
+
+# Check if polygon1 is disjoint from polygon  2
+
+disjoint_result <- st_disjoint(polygon1, polygon2)
+
+print(disjoint_result)
+
+# Yes the two polygons are disjoint
+
+
+```
+
+If you want more look into the vignettes on R help page for the functions. You will find many other more specific solutions like : st_contains_properly(), st_equals_exact() .....
+
+##- 1.2: Spatial joining : st_join(), st_intersection(), st_intersects
+
+```{r joining}
+
+intersection_result <- st_intersection(point, polygon1)
+
+print(intersection_result)
+str(intersection_result) # is a numeric vector indicating that the intersection between the point and the polygon1 is happening on the point it self
+
+intersects_result <- st_intersects(point, polygon1)
+print(intersects_result)
+str(intersects_result) # is a sgbp and a list and indicates that yes they intersect
+
+
+bbox <- st_bbox(st_union(point, polygon1))
+
+plot(polygon1, col = "lightblue", main = "Polygon and point", xlim = c(bbox["xmin"], bbox["xmax"]), ylim = c(bbox["ymin"], bbox["ymax"]))
+plot(point, col = "red", add = TRUE)
+
+```
+
+
+
+##- 1.3: Spatial data aggregation : aggregate()
+
+
+```{r aggregate}
+
+
+
+ita_3 <- st_read(here("data","raw", "gadm41_ITA_shp", "gadm41_ITA_3.shp"))
+#ita_2 <- st_read(here("data","raw", "gadm41_ITA_shp", "gadm41_ITA_2.shp"))
+pop <- raster(here("data","raw","raster","sedac_pop_2000.TIFF"))
+ita_pop <- crop(pop,ita_3) 
+ita_pop_mask <- mask(ita_pop, ita_3)
+
+## we extract the pop info from the raster at the smallest level possible (nuts 3)
+
+pop_3 <- exact_extract(ita_pop_mask, ita_3, fun = "mean", coverage_area = TRUE)
+
+ita_3$pop <- pop_3
+
+ita_3 <- as_Spatial(ita_3)
+
+
+# then we aggregate the nuts 3 shapefile with the pop data and the we compute the mean pop in each of the NUTS 2 units from the NUTS 2 shapefile
+
+ita_agg <- aggregate(ita_3)
+
+ita_agg1 <- aggregate(ita_3, by='NAME_2', sums= list(list(mean, 'pop')))
+
+ita_agg1
+
+ita_agg1 <- st_as_sf(ita_agg1)
+
+names(ita_agg1)
+
+ggplot()+
+geom_sf(data=ita_agg1, aes(fill= pop))
+
+
+```
+
+
+
+Then let´s do some more advanced raster data operation to try to go deeper in handling image data.
+
+## 2:  Map Algebra with raster data 
+
+One of the advantages of rasters is that the coordinates information is stored in an implicit way and this makes the processing time significantly. 
+
+Every time that we ask a raster data the coordinate of a grid cell the program is computing it in real time from the matrix position, the resolution and the origin of the data, but if we do not change the position of the cells we can process the data stored inside of the cells having a one-to-one correspondence between the pre processed cells and the resulting ones. 
+
+This implies that if we have many rasters all with same extent, resolution and origin then we can do computations across cells values treating them as a matrix for processing. This means that operations are going to be different from those of matrix algebra where we change the order of the cells in matrix multiplications and divisions.
+
+Map algebra raster operations in cartographic modeling can be divided into: 
+
+## Local : per-cell operations 
+
+Two very common examples of local operations are:
+
+- the classification of cell values into groups using reclassify()
+
+- NDVI (index of vegetation health) calculation or in general operations between rasters using overlay(), calc() or less efficiently directly the algebric signs
+
+
+We will try both here:
+
+
+### - reclassify()
+
+```{r localreclassification}
+
+#create an example raster
+r <- raster(ncols=36, nrows=18)
+values(r) <- runif(ncell(r)) 
+
+# reclassify the values into three groups 
+# all values > 0 and <= 0.25 become 1, etc.
+m <- c(0, 0.25, 1,  0.25, 0.5, 2,  0.5, 1, 3)
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+rc <- reclassify(r, rclmat)
+
+plot(r)
+plot(rc)
+
+```
+The resulting raster has only 3 colors white, green and yellow
+
+### computing NDVI
+
+```{r localndvi}
+
+# Define two raster layers representing near-infrared (NIR) and red bands
+nir_raster <- raster(ncols=10, nrows=10)
+values(nir_raster) <- runif(ncell(nir_raster))
+red_raster <- raster(ncols=10, nrows=10)
+values(red_raster) <- runif(ncell(red_raster))
+
+# Calculate NDVI
+ndvi <- (nir_raster - red_raster) / (nir_raster + red_raster)
+
+plot(nir_raster, main="NIR Band")
+plot(red_raster, main="Red Band")
+
+plot(ndvi, main="Normalized Difference Vegetation Index (NDVI)")
+
+```
+
+
+If you want to know more about NDVI I encourage you to go to the Earth Data website that has a R blog post style short course on it that is very well done and approachable :
+
+https://www.earthdatascience.org/courses/earth-analytics/multispectral-remote-sensing-data/vegetation-indices-NDVI-in-R/
+
+
+
+
+## Focal : per neighborhood operations
+
+These operations involve a central cell and what is around it (kernel, filter, moving window). Usually is a 3x3 model with 9 cells, the center cell and its 8 neighbors.
+
+With focal() we can perform spatial filtering (or convolution). 
+
+The idea is that focal applies a function to a specific neighborhood and then uses the output as the new value for the central cell and then moves to the next central cell.
+
+In practice to use the focal() function we need to specify a matrix parameter that represents the moving window. 
+
+These operations are used a lot in image processing and the highlight is that if we use a low-passing filter we will smooth the distribution of values removing extremes while if we apply a high-passing filter we will be accentuating features.
+
+
+```{r focal}
+
+# To show how it works in practice we will first create a simple raster
+visualize_raster <- function(r, title) {
+  plot(r, main=title, col=rainbow(100))
+}## function to plot our filtered rasters
+
+
+r <- raster(ncols=12, nrows=6, xmn=0)
+values(r) <- runif(ncell(r)) 
+
+# Visualize the original raster
+visualize_raster(r, "Original Raster")
+
+# Apply a standard 3x3 mean filter
+r3 <- focal(r, w=matrix(1/9,nrow=3,ncol=3)) 
+visualize_raster(r3, "3x3 Mean Filter")
+
+# Apply a larger 5x5 mean filter
+r5 <- focal(r, w=matrix(1/25,nrow=5,ncol=5)) 
+visualize_raster(r5, "5x5 Mean Filter")
+
+# Apply a Gaussian filter
+gf <- focalWeight(r, 2, "Gauss")
+rg <- focal(r, w=gf)
+visualize_raster(rg, "Gaussian Filter")
+
+
+
+```
+
+The principles at the base of focal operations with rasters are those needed to solve celllular automation problems, and in general to simulate processes evolving in time and space where units start from an initial state and then land on a final state at the end of the process based on their neighbors location and characteristics.
+
+
+## Cellular automation game
+
+Have you ever heard about Conway's Game of Life ? It is a classic example of a cellular automaton where cellular automata are mathematical models consisting of a grid of cells, each of which can be in one of a finite number of states. The states of the cells evolve over discrete time steps according to a set of rules based on the states of neighboring cells. We will implement a simple version of it here.
+
+- STEP 1 : Define weight matrix of the filter,  a 3x3 matrix where the neighborhood consists of the cell itself and its eight immediate neighbors.
+The values in the matrix represent the weights assigned to each cell in the neighborhood. Here, all cells are assigned a weight of 1 except for the center cell, which is assigned a weight of 0. This reflects the fact that only neighboring cells contribute to the state of the center cell.
+
+-STEP 2 : Define the gameOfLife function that takes a raster object x as input.
+We use the focal function to compute the sum of the values of the cells in the neighborhood defined by the matrix w, with padding enabled to avoid problems at the edges of the matrix.
+Based on the rules of Conway's Game of Life, the function updates the state of each cell in the raster x according to the following rules:
+        - Any live cell with fewer than two live neighbors dies, as if by underpopulation.
+        - Any live cell with two or three live neighbors lives on to the next generation.
+        - Any live cell with more than three live neighbors dies, as if by overpopulation.
+        - Any dead cell with exactly three live neighbors becomes a live cell, as if by reproduction.
+After updating the state of each cell, the function returns the modified raster object.
+
+-STEP 3: Define sim function that simulates the evolution of the cellular automaton over a specified number of time steps (n) calling the provided function (fun) to update the state of the raster object x at each step. Then it plots the raster object using plot, with a title indicating the current time step.
+It also flushes the plotting device to ensure the plot is displayed immediately, then pauses for a specified duration (pause) using Sys.sleep.
+After completing all iterations, the function returns the final state of the raster object.
+
+
+-STEP 4:  Define init , a raster object representing the initial state of the cellular automaton. It is initialized with a matrix (m) where all cells are initially dead (0), except for specific cells (1) that represent the initial configuration of live cells. 
+
+-STEP 5: Run the game and look at the evolution
+
+```{r gameoflife}
+
+#step 1
+
+w <- matrix(c(1,1,1,1,0,1,1,1,1), nr=3,nc=3)
+
+#step 2
+gameOfLife <- function(x) {
+    f <- focal(x, w=w, pad=TRUE, padValue=0)
+    x[f<2 | f>3] <- 0
+    x[f==3] <- 1
+    x
+}
+
+#step 3 
+
+sim <- function(x, fun, n=100, pause=0.25) {
+    for (i in 1:n) {
+      x <- fun(x)
+      plot(x, legend=FALSE, asp=NA, main=i)
+      dev.flush()
+      Sys.sleep(pause)
+    }
+    invisible(x)
+}
+
+#step 4
+
+  m <- matrix(0, nc=48, nr=34)
+  m[c(40, 41, 74, 75, 380, 381, 382, 413, 417, 446, 452, 480, 
+      486, 517, 549, 553, 584, 585, 586, 619, 718, 719, 720, 752, 
+      753, 754, 785, 789, 852, 853, 857, 858, 1194, 1195, 1228, 1229)] <- 1
+  init <- raster(m)
+
+  
+#step 5
+sim(init, gameOfLife, n=25, pause=0.05)
+
+
+
+
+
+```
+## Zonal operations 
+
+The concept is the same of focal operations but instead of having always a rectangular matrix as filter we can have any shape or size. 
+
+
+We can do zonal operations using the zonal() function and we will see how it works using the data on night lights and population from last lecture about italy. 
+
+```{r zonal}
+
+#from last lecture
+
+ita_2 <- st_read(here("data","raw", "gadm41_ITA_shp", "gadm41_ITA_2.shp"))
+night<- raster(here("data","tmp","night_light_world.tiff"))
+pop <- raster(here("data","raw","raster","sedac_pop_2000.TIFF"))
+
+ita_light <- crop(night,ita_2)   
+ita_pop <- crop(pop,ita_2) 
+ita_light_mask <- mask(ita_light, ita_2)
+ita_pop_mask <- mask(ita_pop, ita_2)
+
+
+# now use resample() to be sure that the two rasters have the same extent and resolution 
+
+ita_pop_mask <- resample(ita_pop_mask, ita_light_mask)
+
+
+
+## then we look into the distribution of population 
+
+hist(ita_pop_mask$sedac_pop_2000)
+summary(ita_pop_mask$sedac_pop_2000)
+
+## use reclassify to create 3 classes of pop density 
+
+m <- c(0, 100, 1,  100, 150, 2,  150, 300, 3)
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+
+# Reclassify the population density raster
+
+pop_categories <- reclassify(ita_pop_mask, rclmat)
+
+summary(pop_categories)
+
+hist(pop_categories)
+
+# now we do zonal on the night lights based on population categories
+
+z <- zonal(ita_light_mask, pop_categories, fun = "mean", na.rm = TRUE) |>
+  as.data.frame()
+
+print(z)
+
+
+```
+
+
+We can observe how more population dense places also have a higher night light illumination level. 
+
+
+
+## Global operations 
+
+
+One typical operation to be computed is the distance, now we will look at the distance of each cell in the italy population from Rome. 
+
+Then we can visualize a scatterplot of the population density in the cell against its distance from capital to observe the relationship between capital location and pop density. 
+We will use as reference point for the capital the centroid of the geographical unit (NAME_3 in the data) of "Fiumicino" so where the international airport is located in the capital.
+
+
+#### First we compute the centroid for the airport geographical unit and visualize it in the context of the capital NUTS 2 
+
+```{r globalfiumicino}
+
+ita_3 <- st_read(here("data","raw", "gadm41_ITA_shp", "gadm41_ITA_3.shp"))
+
+
+rome <- ita_3|>
+  filter(NAME_2 == "Roma")
+
+
+fiumicino <- ita_3|>
+  filter(NAME_3 == "Fiumicino")
+
+
+center_fiumicino <- st_centroid(fiumicino)
+
+
+ggplot()+
+  geom_sf(data= rome, fill= "grey")+
+  geom_sf(data= fiumicino, fill= "lightblue")+
+  geom_sf(data=center_fiumicino, fill="black")+
+  theme_minimal()
+
+print(rome$NAME_3)
+
+```
+
+
+### Then we can compute the distance from the fiumicino center for all the cells in our ita_pop_mask and ita_light_mask rasters
+
+We compute the distance using distanceFromPoints() function
+
+```{r globaldistance}
+
+
+## compute the distance
+
+center <- as_Spatial(center_fiumicino)
+
+dis_light <- distanceFromPoints(ita_light_mask, center)
+
+dis_pop <-  distanceFromPoints(ita_pop_mask, center)
+
+
+plot(dis_light)
+
+plot(dis_pop)
+
+
+```
+
+
+
+
+### Now we can visualize the relationship between the distance and the population and night light density 
+
+
+
+```{r globalvisualize, warning = FALSE, message = FALSE}
+
+
+# firstly we convert the rasters to dataframes and then we merge them on cells id
+
+pop_df <- as.data.frame(ita_pop_mask, xy= TRUE)
+dis_pop_df <- as.data.frame(dis_pop, xy= TRUE)
+
+night_df <- as.data.frame(ita_light_mask, xy= TRUE)
+dis_light_df <- as.data.frame(dis_light, xy= TRUE)
+
+
+light_mix <-merge(night_df, dis_light_df, by = c("x", "y"))
+pop_mix <- merge(pop_df, dis_pop_df, by = c("x", "y"))
+
+
+pop_mix$distance <- pop_mix$layer
+
+ggplot(data = pop_mix, aes(x = distance, y = sedac_pop_2000)) +
+  geom_point() + 
+  geom_smooth(method = "lm", fill = "red", se = TRUE) +  
+  theme_minimal() 
+
+
+```
+It seems that looking at all Italy the relationship is not strong, the correlation line is only slightly downward sloped and points are sparse around the lm predictions.
+
+
+-------------------- TASK SPACE ---------------------------------------
+
+We could try to visualize it geographically by running a simple OLS regression for each NAME_2 unit and coloring the regions with the magnitude of the coefficient, you can try to do it as an exercise if you want.
+
+```{r maptry}
+
+```
+
+
+-----------------------------------------------------------------------
+
+
+# Let´s do some POPULATION WEIGHTNING 
+
+
+This is a very common task that requires to use at the same time raster and vectors. 
+We will extract the night time lights for each NUTS 3 in Italy and weight this measure for the population density in that NUTS 3 to obtain an effective working measure of the night light per inhabitant in our areas of interest.
+
+
+We will then plot the night per inhabitant in each NUTS 3 and compare it with the naked measure of night light to see the correction power of population weightning. 
+
+
+- STEP 1 :  compute light x pop 
+- STEP 2 : extract the values from the rasters 
+- STEP 3 : normalize the value for the population distribution within the country
+
+
+```{r popweight}
+
+
+# raster multiplication
+pop_x_light <- ita_light_mask * ita_pop_mask
+
+# extract the values from the raster and then compute nuts 2 average as a reference for normalization
+
+values <- exact_extract(pop_x_light, ita_3, "sum")
+light_values <- exact_extract(ita_light_mask, ita_3, "sum")
+
+ita_3$tot_pop <- values
+ita_3$light <- light_values
+
+summary(ita_3$tot_pop)
+
+ita_3 <- ita_3 |>
+  group_by(NAME_2)|>
+  mutate(
+    maxpop = sum(tot_pop)
+  )|>
+  ungroup()
+
+#names(ita_3)
+
+#normalize 
+
+ita_3$norm_light <- ita_3$tot_pop / ita_3$maxpop
+
+
+#plot and compare
+
+ggplot() +
+  geom_sf(data = ita_3, aes(fill = norm_light), color = NA) +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  ggtitle("Normalized Night Light per Inhabitant")
+
+ggplot() +
+  geom_sf(data = ita_3, aes(fill = light), color = NA) +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  ggtitle("Non population adjusted Night Light")
+
+
+```
+
+
+Next week we will do multiple raster objects, stars and spatial error correction for causal analysis, then  bonus topic depending on time interactive maps.
