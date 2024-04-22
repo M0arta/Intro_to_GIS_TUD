@@ -1,0 +1,720 @@
+---
+title: "Exercise 6: Spatial Autocorrelation and Spatial Cross-Validation"
+author: "Marta Bernardi"
+date: "2024-04-05"
+output: html_document
+---
+
+### Key packages
+
+-   Geo-computations : sf, terra, raster , ncdf4, exactextractr, rgdgal, spDataLarge
+-   Geocoding : tidygeocoder
+-   R Project management: here
+-   Generic data wrangling : dplyr, tidyr
+-   Map of the world : rnaturalearth, rnaturalearthdata, elevatr
+-   Country and admin names : countrycode
+-   Open street maps : osrm, osmdata
+-   Static and Interactive Maps: tmap, leaflet, mapview, parallelMap, ggplot2, ggrepel, gridExtra, ggspatial, grid
+-   Inference and Statistical learning : mlr, conleyreg, lgr , mlr3, mlr3learners, mlr3extralearners, mlr3spatiotempcv , mlr3tuning, mlr3viz, progressr
+-   GIS softwares bridging: rgrass7 , link2GI
+-   Network analysis : tidygraph
+
+```{r setup, include=FALSE}
+
+
+#devtools::install_github("geocompr/geocompkg")
+
+
+
+library(pacman)
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  lgr, 
+  GGally,
+  osmdata,
+  mlr3, 
+  mlr3learners, 
+  mlr3extralearners,
+  mlr3spatiotempcv , 
+  mlr3tuning,   
+  mlr3viz, 
+  progressr,
+  conleyreg,
+  raster,
+  rnaturalearth,
+  rgrass7,
+  link2GI,
+  spDataLarge,
+  fixest,
+ rnaturalearthdata,
+ exactextractr,
+ ncdf4,
+ grid,
+ ggspatial,
+ gridExtra,
+elevatr,
+ ggrepel,
+ tidygeocoder,
+mlr3extralearners,
+ rgdal,
+tidygraph,
+ osrm ,
+  here,
+  terra,
+  tidyr,
+tmap, 
+parallelMap,
+leaflet,
+mapview,
+mlr
+)
+
+here::i_am("exercises_code/ex_6.Rmd")
+
+```
+
+In this exercise we will see how to integrate the use of geo-data in our econometrics and prediction exercises to try to account for the special features of geographic data and harness at best the information they came with.
+
+First we will look at an unsupervised way to adjust for spatial autocorrelation of socio economic features, clustering. The intuition is that observations are situated in space and therefore by exploiting their location we can derive meaningful grouping to control for baseline attributes across the data.
+
+# Clustering for spatial autocorrelation
+
+## Conley errors
+
+To see what spatial autocorrelation correction can do for you we will use Conley Spatial errors. Here for more details on what exactly Conley standard errors can do https://cran.r-project.org/web/packages/conleyreg/vignettes/conleyreg_introduction.html .
+
+Firts we take our deu_1 borders and then raster information on population and rain.
+
+We will try to answer to the question how whether population density is negatively correlated with rain mean in January.
+
+So the naive fictional story would be that people see how much it rains then move away from the state if it rains too much.
+
+```{r lconley}
+
+##open data and extract rasters
+
+
+pop <- raster(here("data","raw","raster","sedac_pop_2000.TIFF"))
+deu_2 <- st_read(here("data","raw", "gadm41_DEU_shp", "gadm41_DEU_2.shp"))
+deu_pop <- exact_extract(pop, deu_2, fun ="mean")
+deu_2$pop <- deu_pop
+jan_rain <- raster(here("data","tmp","january_rain.tif"))
+jan <- exact_extract(jan_rain, deu_2, fun= "mean")
+deu_2$rain <- jan
+
+## run basic ols regression with feols()
+
+ols <- feols(pop ~ rain, data = deu_2)
+
+etable(ols)
+
+## now we run the same reg with conley error
+
+
+## now to apply conley errors we need to choose a radius for the meaningful distance within which we think things could be spatially autocorrelated, I will choose 100
+## a potential nice way to get a meaningful range would be to compute the mean distance from the centroid still within the same admin unit, but there are many competing ways to obtain the optimal radius and you should read the literature on your specific setting if study
+
+conley <- conleyreg(pop ~ rain, data = deu_2, 100)
+
+print(conley)
+etable(ols)
+
+```
+
+# Supervised learning: using spatial cross-validation to correct for spatial autocorrelation
+
+To see the power of spatial data in prediction exercises we will use a case study from :
+
+<https://r.geocompx.org/spatial-cv>
+
+Using raster data on locations in Southern Ecuador that comes directly with the spDataLarge package we will try to predict land susceptability.
+
+The code below loads three objects:
+
+-   sf data.frame named lsl
+
+-   sf object named study_mask
+
+-   SpatRaster named ta containing terrain attribute rasters.
+
+The idea is that we are around the equator there is a study area and some points (lsl) where the study was conducted and their status and then a raster with characteristics of the area.
+
+```{r crossvalid}
+
+data("lsl", "study_mask", package = "spDataLarge")
+ta = terra::rast(system.file("raster/ta.tif", package = "spDataLarge"))
+
+plot(ta)
+plot(study_mask)
+
+# we make the points a spatial object 
+
+lsl_sf <- st_as_sf(lsl, coords = c("x", "y"))
+
+st_crs(lsl_sf) <- crs(study_mask)
+
+ggplot() +
+  geom_sf(data = study_mask) +
+  geom_sf(data = lsl_sf) +
+  theme_minimal()
+
+head(lsl)
+
+
+
+```
+
+Now that we have the data we can use the attributes we have from the rasters slope + cplan + cprof + elev + log10_carea where :
+
+-   slope: slope angle (°)
+-   cplan: plan curvature (rad m−1) expressing the convergence or divergence of a slope and thus water flow
+-   cprof: profile curvature (rad m-1) as a measure of flow acceleration, also known as downslope change in slope angle
+-   elev: elevation (m a.s.l.) as the representation of different altitudinal zones of vegetation and precipitation in the study area
+-   log10_carea: the decadic logarithm of the catchment area (log10 m2) representing the amount of water flowing towards a location
+
+To predict the terrain susceptability. Supervised learning involves predicting a response variable as a function of predictors and for us the predictors are the terrain characteristics. We will start first running a General Linear Model (GLM) with a binomial model to predict the land susceptability as a 0-1 dummy. Then use predict.glm() to make the prediction.
+
+```{r predict}
+
+# Our outcome variable will be 
+
+table(lsl$lslpts)  # so half (175) of the point are susceptible land side points and half are not 
+
+
+fit = glm(lslpts ~ slope + cplan + cprof + elev + log10_carea,
+          family = binomial(),
+          data = lsl)
+
+summary(fit)
+
+
+pred_glm = predict(object = fit, type = "response")
+head(pred_glm)  # The pred_glm object will contain the probability of each pojt being a land susceptible point
+
+
+
+
+
+```
+
+Now we can exploit the spatial features of our data to apply the coefficients to the raster of the predictors so our "slope + cplan + cprof + elev + log10_carea".
+
+To do this we can use terra::predict()
+
+```{r spatialpredict}
+
+pred = terra::predict(ta, model = fit, type = "response")
+
+mask_pred <- mask(pred, study_mask)
+
+plot(mask_pred)
+
+```
+
+So here we see the predictions of the land susceptability and their spatial distribution.
+
+Disclaimer: we are neglecting spatial autocorrelation since we assume that on average the predictive accuracy remains the same with or without spatial autocorrelation structures. However, it is possible to include spatial autocorrelation structures into models as well as into predictions.
+
+Now the question we should be asking to our self is : \*\* how good the underlying model is at making them since a prediction map is useless if the model’s predictive performance is bad ? \*\*
+
+A preliminary measure to assess the predictive performance of a binomial model is the Area Under the Receiver Operator Characteristic Curve (AUROC). This is a value between 0.5 and 1.0, with 0.5 indicating a model that is no better than random and 1.0 indicating perfect prediction of the two classes.
+
+```{r auroc}
+
+pROC::auc(pROC::roc(lsl$lslpts, fitted(fit)))
+
+
+```
+
+0.82 seems to be a good fit, but it can be biased giving that we computed it on the full dataset.
+
+#### To reduce bias we can use spatial cross-validation
+
+Cross-validation belongs to the family of **resampling methods**.
+
+The basic idea is to split (repeatedly) a dataset into training and test sets whereby the training data is used to fit a model which then is applied to the test set.
+
+Comparing the predicted values with the known response values from the test set (using a performance measure such as the AUROC in the binomial case) gives a bias-reduced assessment of the model’s capability to generalize the learned relationship to independent data.
+
+Eg. a 100-repeated 5-fold cross-validation means to randomly split the data into five partitions (folds) with each fold being used once as a test set. This makes sure that each observation is used once in one of the test sets, and requires the fitting of five models. Then, this procedure is repeated 100 times. Of course, the data splitting will differ in each repetition. Overall, this sums up to 500 models, the mean performance measure (AUROC) of all models is the model’s overall predictive power.
+
+But for spatial data we know that points near each other are going to be similar: so these points are not statistically independent because training and test points in conventional CV are often too close to each other.
+
+‘Training’ observations near the ‘test’ observations can provide a kind of ‘sneak preview’: information that should be unavailable to the training dataset. To alleviate this problem ‘spatial partitioning’ is used to split the observations into spatially disjointed subsets (using the observations’ coordinates in a k-means clustering. This partitioning strategy is the only difference between spatial and conventional CV.
+
+To do this is in practice there are many packages, here we will follow the case study and use **mlr3** and its ecosystem, in this way we adopt a clear way of building blocks for the CV anaylsis.
+
+![](images/12_ml_abstraction_crop.png)
+
+There are three main stages:
+
+-   1- a **task** specifies the data (including response and predictor variables) and the model type (eg. regression or classification).
+
+-   2- a **learner** defines the specific learning algorithm that is applied to the created task.
+
+-   3 - the **resampling** approach assesses the predictive performance of the model, i.e. its ability to generalize to new data.
+
+We will go in practice through them:
+
+### 1 - Creating a TASK
+
+We will use : [`as_task_classif_st()`](https://mlr3spatiotempcv.mlr-org.com/reference/as_task_classif_st.html) of the **mlr3spatiotempcv** package , we do this because we have a binary outcome and we have a spatial dimension.
+
+The target is our "lslpts" outcome that in this context is indicated also as response variable.
+
+```{r task}
+
+task = mlr3spatiotempcv::as_task_classif_st(
+  mlr3::as_data_backend(lsl), 
+  target = "lslpts", 
+  id = "ecuador_lsl",
+  positive = "TRUE",
+  coordinate_names = c("x", "y"),
+  crs = "EPSG:32717",
+  coords_as_features = FALSE
+  )
+
+
+```
+
+We can visualize the relationship between the predictors and the response function easly using the [`autoplot()`](https://ggplot2.tidyverse.org/reference/autoplot.html) function of the **mlr3viz** package.
+
+```{r autoplot, warning = FALSE, message = FALSE}
+
+#plot response against each predictor
+
+mlr3viz::autoplot(task, type = "duo")
+
+# plot all variables against each other 
+mlr3viz::autoplot(task, type = "pairs")
+```
+
+\### 2- LEARNER
+
+We need to choose a learner that determines the statistical learning method to use. All classification learners start with classif. and all regression learners with regr.
+
+First we will look at all the available models for the learners available in the package we are using with : mlr3extralearners::list_mlr3learners()
+
+```{r learner, warning = FALSE, message = FALSE}
+
+# options(repos=c(
+#   mlrorg = 'https://mlr-org.r-universe.dev',
+#   raphaels1 = 'https://raphaels1.r-universe.dev',
+#   CRAN = 'https://cloud.r-project.org'
+# ))
+# install.packages("mlr3proba")
+
+
+#remotes::install_github("mlr-org/mlr3extralearners@*release")
+
+mlr3extralearners::list_mlr3learners(
+  filter = list(class = "classif", properties = "twoclass"), 
+  select = c("id", "mlr3_package", "required_packages")) |>
+  head()
+
+
+```
+
+This yields all learners able to model two-class problems (landslide yes or no).
+
+We opt for a binomial classification method implemented as classif.log_reg in mlr3learners.
+
+Additionally, we need to specify the predict.type which determines the type of the prediction with prob resulting in the predicted probability for landslide occurrence between 0 and 1 (this corresponds to type = response in predict.glm()).
+
+```{r learmore, warning = FALSE, message = FALSE}
+
+learner = mlr3::lrn("classif.log_reg", predict_type = "prob")
+
+```
+
+### 3- RESAMPLING
+
+We will use a 100-repeated 5-fold spatial Cross Validation: five partitions will be chosen based on the provided coordinates in our task and the partitioning will be repeated 100 times.
+
+```{r resampling, warning = FALSE, message = FALSE}
+
+resampling = mlr3::rsmp("repeated_spcv_coords", folds = 5, repeats = 100)
+
+
+```
+
+To execute the spatial resampling, we run resample() using the previously specified task, learner, and resampling strategy. This takes some time because it computes 500 resampling partitions and 500 models.
+
+As performance measure, we again choose the AUROC. To retrieve it, we use the score() method of the resampling result output object (score_spcv_glm). This returns a data.table object with 500 rows – one for each model.
+
+```{r perform, warning = FALSE, message = FALSE}
+
+# first some admin to reduce verbosity in the output we get from the function
+
+lgr::get_logger("mlr3")$set_threshold("warn")
+
+# run spatial cross-validation and save it to resample result glm (rr_glm)
+
+rr_spcv_glm = mlr3::resample(task = task,
+                             learner = learner,
+                             resampling = resampling)
+
+# compute the AUROC as a data.table
+score_spcv_glm = rr_spcv_glm$score(measure = mlr3::msr("classif.auc"))
+
+# keep only the columns you need
+score_spcv_glm = dplyr::select(score_spcv_glm, task_id, learner_id, 
+                               resampling_id, classif.auc)
+
+
+## now we can compute the bias corrected performace measure for the model 
+
+mean(score_spcv_glm$classif.auc) |>
+  round(2)
+
+```
+
+So we see that the previous 0.82 was containing an overestimation bias. In general the spatially cross-validated (CV) result yields lower AUROC values on average than the conventional cross-validation approach, underlining the over-optimistic predictive performance of the latter due to its spatial autocorrelation.
+
+
+
+######################################### EXTRA if we have time ####################################################################################
+
+# Spatial Networks Fundamentals
+
+We will work with data on the German city of Münster in Germany following the case study from <https://r-spatial.org/r/2019/09/26/spatial-networks.html>
+
+We use the Open Street Map tool that we have already seen in past leactures to call the sf object with LINESTRINGS representing highways.
+
+```{r osmdata, warning = FALSE, message = FALSE}
+
+## we use open street maps to get the data 
+
+muenster <- opq(bbox =  c(7.61, 51.954, 7.636, 51.968)) %>% 
+  add_osm_feature(key = 'highway') %>% 
+  osmdata_sf() %>% 
+  osm_poly2line()   ## we use poly2line to correct for looping streets that are considered as polygons instead of linestring by default
+
+muenster_center <- muenster$osm_lines %>% 
+  dplyr::select(highway)
+
+
+ggplot() +
+  geom_sf(data = muenster_center) +
+  ggtitle("Münster highways OSM data") +
+  theme_minimal()
+
+
+
+```
+
+#### Topology cleaning
+
+To perform network analysis, we need a network with a clean topology. The v.clean toolset from the GRASS GIS software provides automated functionalities for this task, GRASS GIS is a software that is external to R and there is no explicit R package that does the same.
+
+This is potentially a great moment to learn how to **bridge** from R to other GIS softwares, in this case GRASS GIS. There are packages to do the bridging, we could use: rgrass7 and link2GI
+
+Bridging means that now we will run a series of operation as if we were inside of the GRASS program: we will clean the network topology by breaking lines at intersections and also breaking lines that form a collapsed loop and we will remove the duplicated geometry features. Then we would bring the data back to R .
+
+Although I do not want you all to start downloading the GRASS GIS program, so for this relatively small network we can do manually the cleaning.
+
+```{r cleantopo}
+
+
+# Break lines at intersections
+
+muenster_segmentized <- st_segmentize(muenster_center, df = 0.1)
+
+muenster_cleaned <- st_cast(muenster_segmentized, "LINESTRING")
+
+ggplot()+
+  geom_sf(data = muenster_cleaned)+
+  theme_minimal()
+
+
+muenster_cleaned
+```
+
+#### Givein an index to the edges
+
+The edges of the network, are simply the linestrings in the data. Each of them gets a unique index, which can later be related to their start and end node.
+
+```{r edges}
+
+#muenster_cleaned <- st_as_sf(muenster_cleaned)
+
+
+edges <- muenster_cleaned %>%
+  dplyr::mutate(edgeID = c(1:n()))
+
+
+# ggplot()+
+#   geom_sf(data = edges)+
+#   theme_minimal()
+
+edges
+
+
+
+```
+
+#### Nodes
+
+The nodes of the network, are the start and end points of the edges. The locations of these points can be derived by using the st_coordinates function in sf. When given a set of linestrings, this function breaks down each of them into the points they are built up from. It returns a matrix with the X and Y coordinates of those points, and additionally an integer indicator L1 specifying to which line a point belongs. These integer indicators correspond to the edge indices defined in step 1. That is, if we convert the matrix into a data.frame or tibble, group the features by the edge index, and only keep the first and last feature of each group, we have the start and end points of the linestrings.
+
+```{r nodes}
+
+nodes <- edges %>%
+  st_coordinates() %>%
+  as_tibble() %>%
+  rename(edgeID = L1) %>%
+  group_by(edgeID) %>%
+  slice(c(1, n())) %>%
+  ungroup() %>%
+  mutate(start_end = rep(c('start', 'end'), times = n()/2))
+
+nodes
+
+
+```
+
+#### Giving an index to the nodes
+
+Each of the nodes in the network needs to get a unique index, such that they can be related to the edges.
+
+However, we need to take into account that edges can share either startpoints and/or endpoints. Such duplicated points, that have the same X and Y coordinate, are one single node, and should therefore get the same index.
+
+Note that the coordinate values as displayed in the tibble are rounded, and may look the same for several rows, even when they are not. We can use the group_indices function in dplyr to give each group of unique X,Y-combinations a unique index.
+
+```{r nodeindex}
+
+nodes <- nodes %>%
+  mutate(xy = paste(.$X, .$Y)) %>% 
+  mutate(nodeID = group_indices(., factor(xy, levels = unique(xy)))) %>%
+  dplyr::select(-xy)
+
+nodes
+
+
+```
+
+##### Combining Edges and Nodes
+
+Now each of the start and endpoints have been assigned a node ID in step 4, so that we can add the node indices to the edges. In other words, we can specify for each edge, in which node it starts, and in which node it ends.
+
+```{r combine}
+
+source_nodes <- nodes %>%
+  filter(start_end == 'start') %>%
+  pull(nodeID)
+
+target_nodes <- nodes %>%
+  filter(start_end == 'end') %>%
+  pull(nodeID)
+
+edges = edges %>%
+  mutate(from = source_nodes, to = target_nodes)
+
+edges
+
+```
+
+#### Remove duplicate nodes
+
+Having added the unique node ID’s to the edges data, we don’t need the duplicated start and endpoints anymore. After removing them, we end up with a tibble in which each row represents a unique, single node. This tibble can be converted into an sf object, with POINT geometries.
+
+```{r duplicates}
+
+nodes <- nodes %>%
+  distinct(nodeID, .keep_all = TRUE) %>%
+  dplyr::select(-c(edgeID, start_end)) %>%
+  st_as_sf(coords = c('X', 'Y')) %>%
+  st_set_crs(st_crs(edges))
+
+nodes
+
+
+```
+
+#### Make a table graph with the Network
+
+These steps led to one sf object with LINESTRING geometries, representing the edges of the network, and one sf object with POINT geometries, representing the nodes of the network.
+
+The tbl_graph function allows us to convert these two into a tbl_graph object.
+
+There are two tricky parts in this step that need to be highlighted.
+
+One, is that the columns containing the indices of the source and target nodes should either be the first two columns of the sf object, or be named ‘to’ and ‘from’, respectively.
+
+Secondly, inside the tbl_graph function, these columns are converted into a two-column matrix. However, an sf object has a so-called ‘sticky geometry’, which means that the geometry column sticks to the attributes whenever specific columns are selected. Therefore, the matrix created inside tbl_graph has three columns instead of two, and that causes an error. Therefore, we first need to convert the sf object to a regular data.frame or tibble, before we can construct a tbl_graph. In the end, this doesn’t matter, since both the nodes and edges will be ‘integrated’ into an igraph structure, and loose their specific sf characteristics.
+
+```{r network}
+
+graph = tbl_graph(nodes = nodes, edges = as_tibble(edges), directed = FALSE)
+
+graph
+
+
+
+
+```
+
+## Network analysis
+
+Having the network stored in the tbl_graph structure, with a geometry list column for both the edges and nodes, enables us to combine the wide range of functionalities in sf and tidygraph, in a way that fits neatly into the tidyverse.
+
+With the activate() verb, we specify if we want to manipulate the edges or the nodes. Then, most dplyr verbs can be used in the familiar way, also when directly applied to the geometry list column. For example, we can add a variable describing the length of each edge, which, later, we use as a weight for the edges.
+
+```{r lenght}
+
+graph <- graph %>%
+  activate(edges) %>%
+  mutate(length = st_length(geometry))
+
+graph
+
+
+```
+
+We can also ‘escape’ the graph structure, turn either the edges or nodes back into real sf objects, and, for example, summarise the data based on a specific variable.
+
+```{r escape}
+graph %>%
+  activate(edges) %>%
+  as_tibble() %>%
+  st_as_sf() %>%
+  group_by(highway) %>%
+  summarise(length = sum(length))
+
+
+
+## and now that is an sf object we can plot it again 
+ggplot() +
+  geom_sf(data = graph %>% activate(edges) %>% as_tibble() %>% st_as_sf()) + 
+  geom_sf(data = graph %>% activate(nodes) %>% as_tibble() %>% st_as_sf(), size = 0.5)
+
+
+## or make an interactive map out of it with tmap
+
+
+tmap_mode('view')
+
+tm_shape(graph %>% activate(edges) %>% as_tibble() %>% st_as_sf()) +
+  tm_lines() +
+tm_shape(graph %>% activate(nodes) %>% as_tibble() %>% st_as_sf()) +
+  tm_dots() +
+tmap_options(basemaps = 'OpenStreetMap')
+  
+```
+
+#### Measuring centrality
+
+Centraltity measures describe the importances of nodes in the network and there are many of theme, here the most famous 5 ones.
+
+-   **Degree centrality**: assigns an importance score based simply on the number of links held by each node.
+
+-   **Betweenness centrality** : measures the number of times a node lies on the shortest path between other nodes.
+
+-   **Closeness centrality** : scores each node based on their ‘closeness’ to all other nodes in the network.
+
+-   **EigenCentrality** : measures a node’s influence based on the number of links it has to other nodes in the network. EigenCentrality then goes a step further by also taking into account how well connected a node is, and how many links their connections have, and so on through the network.
+
+-   **PageRank** is a variant of EigenCentrality, also assigning nodes a score based on their connections, and their connections’ connections. The difference is that PageRank also takes link direction and weight into account – so links can only pass influence in one direction, and pass different amounts of influence.
+
+We will start by using the easiest one that is Degree centrality and the most common that is Betwenness centrality
+
+
+
+
+```{r central}
+
+
+
+graph <- graph %>%
+  activate(nodes) %>%
+  mutate(degree = centrality_degree()) %>%
+  mutate(betweenness = centrality_betweenness(weights = length)) %>%
+  activate(edges) %>%
+  mutate(betweenness = centrality_edge_betweenness(weights = length))
+
+graph
+
+
+
+## and we can plot it coloring the nodes and making their size to be proportional to the betweeness centrality we calculated
+
+ggplot() +
+  geom_sf(data = graph %>% activate(edges) %>% as_tibble() %>% st_as_sf(), col = 'grey50') + 
+  geom_sf(data = graph %>% activate(nodes) %>% as_tibble() %>% st_as_sf(), aes(col = betweenness, size = betweenness)) +
+  scale_colour_viridis_c(option = 'inferno') +
+  scale_size_continuous(range = c(0,4))
+
+
+## or making the edges colored based on the centrality 
+
+
+ggplot() +
+  geom_sf(data = graph %>% activate(edges) %>% as_tibble() %>% st_as_sf(), aes(col = betweenness, size = betweenness)) +
+  scale_colour_viridis_c(option = 'inferno') +
+  scale_size_continuous(range = c(0,4))
+
+```
+#### Computing shortest paths 
+
+We saw a bit of this using the trip and path function in open street maps tools, but this is a core task in network analysis with spatial data. The task is always finding the path between two nodes that minimizes either the travel distance or travel time. In igraph, there are several functions that can be used for this purpose, and since a tbl_graph is just a subclass of an igraph object, we can directly input it into every function in the igraph package.  https://igraph.org/   
+
+The function distances, for example, returns a numeric matrix containing the distances of the shortest paths between every possible combination of nodes. It will automatically choose a suitable algorithm to calculate these shortest paths.
+
+```{r shortest}
+
+distances <- igraph::distances(
+  graph = graph,
+  weights = graph %>% activate(edges) %>% pull(length)
+)
+
+distances[1:5, 1:5]
+
+```
+
+The function ‘shortest_paths’ not only returns distances, but also the indices of the nodes and edges that make up the path. When we relate them to their corresponding geometry columns, we get the spatial representation of the shortest paths. Instead of doing this for all possible combinations of nodes, we can specify from and to which nodes we want to calculate the shortest paths. 
+
+Here, we will show an example of a shortest path from one node to another, but it is just as well possible to do the same for one to many, many to one, or many to many nodes. Whenever the graph is weighted, the Dijkstra algoritm will be used under the hood. 
+
+
+Note here that we have to define the desired output beforehand: vpath means that only the nodes (called vertices in igraph) are returned, epath means that only the edges are returned, and both returns them both.
+
+
+```{r path}
+
+
+from_node <- graph %>%
+  activate(nodes) %>%
+  filter(nodeID == 34) %>%
+  pull(nodeID)
+
+to_node <- graph %>%
+  activate(nodes) %>%
+  filter(nodeID == 18) %>%
+  pull(nodeID)
+
+path <- igraph::shortest_paths(
+  graph = graph,
+  from = from_node,
+  to = to_node,
+  output = 'both',
+  weights = graph %>% activate(edges) %>% pull(length)
+)
+
+path$vpath
+path$epath
+
+```
+We see that is giving a warning message saying that the vertex could not be reached, this means that we have done something off when cleaing the topology (this is very common and this is why is worth the effort to do the bridging to softwares like GRASS GIS). 
+
+To check if this is actually the problem let´s use the is_connected() function from igraph to check if the network is connected or not. 
+
+```{r connected}
+igraph::is_connected(graph)
+```
+
+
+The answer is FALSE so we have a missing edge problem. We will not fix it now, you can try to do it as a challenge at home ! 
+
+
