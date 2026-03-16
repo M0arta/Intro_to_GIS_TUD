@@ -1,0 +1,381 @@
+---
+title: "Session 5: Geodata Visualization"
+subtitle: "Introduction to GIS for Economists"
+author: "Marta Bernardi"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    df-print: paged
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+## Before we start {.unnumbered}
+
+This session uses data from previous sessions. Make sure the following files are in place:
+
+```
+intro_to_gis/
+├── exercises_code/
+│   └── ex_5.qmd
+└── data/
+    ├── raw/
+    │   ├── raster/
+    │   │   └── sedac_pop_2000.TIFF          <- from Session 3
+    │   ├── gadm41_DEU_shp/                  <- from Session 2
+    │   └── precip.mon.ltm.1991-2020.nc      <- NEW: download from OPAL
+    └── tmp/
+        └── january_rain.tif                 <- will be created in this session
+```
+
+The precipitation NetCDF file can also be downloaded directly from [NOAA PSL](https://downloads.psl.noaa.gov/Datasets/cmap/enh/).
+
+```{r setup}
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  terra,
+  ncdf4,
+  exactextractr,
+  rnaturalearth,
+  rnaturalearthdata,
+  ggspatial,
+  cartogram,
+  tmap,
+  leaflet,
+  mapview,
+  gifski,
+  geodata,
+  here,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_5.qmd")
+```
+
+```{r load-data}
+pop  <- raster(here("data", "raw", "raster", "sedac_pop_2000.TIFF"))
+deu_1 <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_1.shp"))
+
+# Extract population for each German Land
+deu_pop <- exact_extract(pop, deu_1, fun = "mean")
+deu_1$pop <- deu_pop
+```
+
+---
+
+## ggplot best practices for maps
+
+You already know `geom_sf()`. Before moving to other tools, here are a few additions that make publication-quality maps.
+
+```{r ggplot-advanced}
+# Scale bar and north arrow via ggspatial
+ggplot() +
+  geom_sf(data = deu_1, aes(fill = pop)) +
+  scale_fill_viridis_c(name = "Pop density") +
+  annotation_scale(location = "br", style = "ticks") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering()) +
+  labs(title = "German population density by Land") +
+  theme_void()
+```
+
+::: {.callout-tip}
+## When to use ggplot vs tmap
+`ggplot` with `geom_sf` is the best choice for most static maps, especially when the map is one panel in a larger figure. `tmap` shines for multi-panel facet maps and interactive maps, where its syntax is more concise.
+:::
+
+---
+
+## Cartograms
+
+A cartogram distorts the physical geography so that the area of each unit is proportional to a variable (here: population). This makes differences in the variable immediately visible at the cost of geographic accuracy.
+
+```{r cartogram-prep}
+# Cartogram requires a projected CRS
+deu_1_proj <- st_transform(deu_1, "+proj=merc +a=6378137 +b=6378137")
+```
+
+```{r cartogram-types}
+# Continuous cartogram: shapes are distorted but still connected
+deu_cont  <- cartogram_cont(deu_1_proj, "pop", itermax = 5)
+
+# Non-contiguous cartogram: shapes shrink/grow but keep position
+deu_ncont <- cartogram_ncont(deu_1_proj, "pop")
+
+# Dorling cartogram: shapes become circles proportional to the variable
+deu_dorling <- cartogram_dorling(deu_1_proj, "pop")
+
+p1 <- ggplot() + geom_sf(data = deu_1_proj, aes(fill = pop)) +
+  scale_fill_viridis_c() + labs(title = "Standard map") + theme_void()
+
+p2 <- ggplot() + geom_sf(data = deu_cont, aes(fill = pop)) +
+  scale_fill_viridis_c() + labs(title = "Continuous cartogram") + theme_void()
+
+p3 <- ggplot() + geom_sf(data = deu_ncont, aes(fill = pop)) +
+  scale_fill_viridis_c() + labs(title = "Non-contiguous") + theme_void()
+
+p4 <- ggplot() + geom_sf(data = deu_dorling, aes(fill = pop)) +
+  scale_fill_viridis_c() + labs(title = "Dorling (circles)") + theme_void()
+
+gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+::: {.callout-note}
+## Cartograms in economics
+Cartograms appear in papers studying electoral geography, regional inequality, and migration flows. They are effective when there is a large variance in unit size (e.g. comparing Wyoming and California) and you want the visual to reflect population or economic weight rather than land area.
+:::
+
+---
+
+## tmap -- static maps
+
+`tmap` uses a layered grammar similar to ggplot, but is designed specifically for maps. Its syntax is consistent across vector and raster data, and it handles multi-panel and interactive maps cleanly.
+
+### Basic polygon maps
+
+```{r tmap-basics}
+# Fill only
+tm_shape(deu_1) + tm_fill()
+
+# Borders only
+tm_shape(deu_1) + tm_borders()
+
+# Both
+tm_shape(deu_1) + tm_polygons()
+
+# Colour by a variable
+tm_shape(deu_1) +
+  tm_polygons(col = "pop", midpoint = 0, palette = "viridis") +
+  tm_layout(title = "German population density")
+```
+
+### Colour scales and breaks
+
+```{r tmap-scales}
+# Quantile breaks: equal number of units in each bin
+tm_shape(deu_1) +
+  tm_polygons(col = "pop", style = "quantile", palette = "viridis")
+
+# Custom breaks
+tm_shape(deu_1) +
+  tm_polygons(col = "pop", breaks = c(0, 120, 150, 215), palette = "viridis")
+
+# Choosing palette type:
+# Sequential (light to dark): for one-direction data (amounts, densities)
+# Diverging: for data with a meaningful midpoint (change, residuals)
+# Categorical: for unordered groups
+
+tm_shape(deu_1) +
+  tm_polygons(col = "pop", style = "pretty", palette = "viridis") +
+  tm_style("col_blind") +
+  tm_layout(
+    title = "German population density",
+    frame.lwd = 2,
+    legend.position = c("left", "bottom"),
+    inner.margins = 0.15
+  )
+```
+
+### Combining raster and vector layers
+
+```{r tmap-layers}
+saxony <- deu_1 |> filter(VARNAME_1 == "Saxony")
+saxony_wgs <- st_transform(saxony, crs = 4326)
+
+saxony_pop <- crop(pop, saxony_wgs) |> mask(saxony_wgs)
+
+tm_shape(saxony_pop) +
+  tm_raster(palette = "viridis", title = "Pop density") +
+  tm_shape(saxony) +
+  tm_borders(col = "black", lwd = 1.5) +
+  tm_layout(title = "Saxony population density")
+```
+
+### Multi-panel layout
+
+```{r tmap-arrange}
+bavaria <- deu_1 |> filter(VARNAME_1 == "Bavaria")
+bavaria_wgs <- st_transform(bavaria, crs = 4326)
+bavaria_pop <- crop(pop, bavaria_wgs) |> mask(bavaria_wgs)
+
+map_saxony <- tm_shape(saxony_pop) +
+  tm_raster(palette = "viridis") +
+  tm_shape(saxony) + tm_borders() +
+  tm_layout(title = "Saxony")
+
+map_bavaria <- tm_shape(bavaria_pop) +
+  tm_raster(palette = "viridis") +
+  tm_shape(bavaria) + tm_borders() +
+  tm_layout(title = "Bavaria")
+
+tmap_arrange(map_saxony, map_bavaria, ncol = 2)
+```
+
+---
+
+## Animated maps with tmap
+
+We use monthly precipitation data to show how `tmap` can animate a variable over time.
+
+```{r load-precip}
+rain_nc <- nc_open(here("data", "raw", "precip.mon.ltm.1991-2020.nc"))
+
+lon <- ncvar_get(rain_nc, "lon")
+lat <- ncvar_get(rain_nc, "lat", verbose = FALSE)
+rain_mean <- ncvar_get(rain_nc, "precip")
+
+fillvalue <- ncatt_get(rain_nc, "precip", "_FillValue")
+rain_mean[rain_mean == fillvalue$value] <- NA
+nc_close(rain_nc)
+
+# Build individual raster layers for each month
+rain_rasters <- vector("list", 12)
+for (n in 1:12) {
+  slice <- rain_mean[, , n]
+  rain_rasters[[n]] <- raster(
+    t(slice),
+    xmn = min(lon), xmx = max(lon),
+    ymn = min(lat), ymx = max(lat),
+    crs = CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0")
+  )
+}
+
+jan_rain <- rain_rasters[[1]]
+writeRaster(jan_rain, here("data", "tmp", "january_rain.tif"), overwrite = TRUE)
+```
+
+```{r extract-rain}
+# Extract mean monthly rain for each German Land
+month_names <- c("jan", "feb", "mar", "apr", "may", "jun",
+                 "jul", "aug", "sep", "oct", "nov", "dec")
+
+for (i in 1:12) {
+  deu_1[[paste0(month_names[i], "_rain")]] <- exact_extract(rain_rasters[[i]], deu_1, fun = "mean")
+}
+
+# Reshape to long format for tmap facets
+rain_cols <- paste0(month_names, "_rain")
+deu_long  <- tidyr::pivot_longer(deu_1, cols = all_of(rain_cols),
+                                  names_to = "month", values_to = "rain")
+deu_long$month <- gsub("_rain", "", deu_long$month)
+deu_long$month <- factor(deu_long$month, levels = month_names)
+```
+
+```{r tmap-facets}
+# Static facet grid: one panel per season (Jan, Apr, Aug, Oct)
+deu_seasons <- deu_long |> filter(month %in% c("jan", "apr", "aug", "oct"))
+
+tm_shape(deu_seasons) +
+  tm_polygons(col = "rain", style = "cont", palette = "viridis", title = "Mean rain") +
+  tm_facets(by = "month", ncol = 2) +
+  tm_layout(legend.outside.size = 0.2)
+```
+
+```{r tmap-animation, eval=FALSE}
+# Animated GIF cycling through all 12 months
+rain_animation <- tm_shape(deu_long) +
+  tm_polygons(col = "rain", style = "cont", palette = "viridis") +
+  tm_facets(along = "month") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+tmap_animation(
+  rain_animation,
+  filename = here("rain.gif"),
+  delay = 60,
+  width  = 1200,
+  height = 800
+)
+```
+
+::: {.callout-note}
+## eval=FALSE for the animation
+The animation chunk is set to `eval=FALSE` because rendering 12 frames takes time. Run it manually in your console. The output is saved as `rain.gif` in your project root.
+:::
+
+---
+
+## Interactive maps
+
+### tmap in view mode
+
+Switching `tmap` to interactive mode is a single function call.
+
+```{r tmap-interactive}
+world_map <- ne_countries(scale = "medium", returnclass = "sf") |>
+  st_make_valid()
+
+pop_world <- exact_extract(pop, world_map, fun = "mean")
+world_map$pop <- pop_world
+
+tmap_mode("view")
+tm_shape(world_map) +
+  tm_polygons(col = "pop", midpoint = 0, palette = "viridis",
+              popup.vars = c("name", "pop"))
+```
+
+```{r reset-tmap-mode}
+# Always reset to plot mode after interactive exploration
+tmap_mode("plot")
+```
+
+### leaflet
+
+`leaflet` gives finer control over interactive maps and is the engine underneath `tmap`'s view mode. Useful when you need custom popups, multiple base layers, or more complex interactivity.
+
+```{r leaflet}
+world_wgs <- st_transform(world_map, crs = 4326)
+
+leaflet(data = world_wgs) |>
+  addTiles() |>
+  addPolygons(
+    fillColor  = ~colorNumeric("viridis", pop)(pop),
+    fillOpacity = 0.7,
+    color      = "white",
+    weight     = 0.5,
+    popup      = ~paste0("<b>", name, "</b><br>Pop density: ", round(pop, 1))
+  ) |>
+  addLegend(
+    pal      = colorNumeric("viridis", world_wgs$pop),
+    values   = ~pop,
+    title    = "Pop density",
+    position = "bottomright"
+  )
+```
+
+---
+
+::: {.callout-caution}
+## Exercise -- Saxony population map with tmap
+1. Extract population for each Saxony Kreis from `deu_2` (load from the shapefile used in Session 2).
+2. Make a `tmap` choropleth of Saxony Kreise coloured by population density with `style = "quantile"` and a `"viridis"` palette.
+3. Add a layout with a title and legend positioned at the bottom left.
+4. Switch to `tmap_mode("view")` and explore the interactive version. Which Kreis is most densely populated?
+5. **Bonus:** Export the static map as a PNG using `tmap_save(map, filename = "saxony_pop.png")`.
+:::
+
+---
+
+## Further reading {.unnumbered}
+
+- [tmap: making maps with R (book chapter)](https://bookdown.org/nicohahn/making_maps_with_r5/docs/tmap.html)
+- [leaflet for R](https://bookdown.org/nicohahn/making_maps_with_r5/docs/leaflet.html)
+- [mapview documentation](https://r-spatial.github.io/mapview/index.html)
+- [cartogram package](https://cran.r-project.org/web/packages/cartogram/readme/README.html)
+- [Geocomputation with R -- Chapter 8 (making maps)](https://r.geocompx.org/adv-map)

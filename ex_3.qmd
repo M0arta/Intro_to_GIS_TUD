@@ -1,0 +1,410 @@
+---
+title: "Session 3: Raster Data, Real Sources and Extractions"
+subtitle: "Introduction to GIS for Economists"
+author: "Marta Bernardi"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    df-print: paged
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+## Before we start {.unnumbered}
+
+Make sure you have the following files downloaded from OPAL and placed in your project before the session:
+
+```
+intro_to_gis/
+├── exercises_code/
+│   └── ex_3.qmd
+└── data/
+    └── raw/
+        ├── raster/
+        │   ├── night_light_15.nc        <- NEW: download from OPAL
+        │   └── sedac_pop_2000.TIFF      <- NEW: download from OPAL
+        └── gadm41_ITA_shp/              <- NEW: download from OPAL
+            ├── gadm41_ITA_2.shp
+            ├── gadm41_ITA_3.shp
+            └── ... (all accompanying files)
+```
+
+You will also need a `data/tmp/` folder -- create it now if it does not exist. Some outputs from this session will be saved there and reused in later sessions.
+
+```{r setup}
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  terra,
+  ncdf4,
+  exactextractr,
+  rnaturalearth,
+  rnaturalearthdata,
+  geodata,
+  httr,
+  jsonlite,
+  readr,
+  rvest,
+  here,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_3.qmd")
+```
+
+---
+
+## Where does geo-data come from?
+
+Before loading our raster files, it is worth spending a few minutes on the question you will always face when starting a project: where do I actually find this data, and how do I get it into R without manually downloading and uploading files every time?
+
+### Option 1 -- R packages with built-in data
+
+Best for frequently-used reference datasets and examples.
+
+```{r data-packages}
+# Vector: world borders from rnaturalearth
+world <- ne_countries(scale = "medium", returnclass = "sf")
+plot(world["pop_est"], main = "World population estimate")
+
+# Admin boundaries: geodata::gadm() -- no manual download needed
+ita_1 <- geodata::gadm(country = "ITA", level = 1, path = tempdir()) |> st_as_sf()
+plot(ita_1["NAME_1"], main = "Italy: Admin Level 1")
+```
+
+### Option 2 -- Reading data directly from a URL
+
+Best when data is already hosted online (e.g. a GitHub repository or open data portal).
+
+```{r data-url}
+url_csv <- "http://s3.amazonaws.com/assets.datacamp.com/course/importing_data_into_r/swimming_pools.csv"
+pools <- read_csv(url_csv)
+head(pools)
+```
+
+### Option 3 -- APIs
+
+Many data providers (NASA, Copernicus, World Bank) offer APIs. You register, get a key, and download programmatically. Here is an example using the Copernicus climate data store via `ecmwfr`:
+
+```{r data-api, eval=FALSE}
+# You would first store your key safely using keyring:
+# library(keyring)
+# key_set_with_value(service = "cds", username = "your@email.com", password = "YOUR_API_KEY")
+
+library(ecmwfr)
+
+wf_set_key(key = "YOUR_API_KEY")
+
+request <- list(
+  dataset_short_name = "reanalysis-era5-single-levels",
+  product_type       = "reanalysis",
+  variable           = "2m_temperature",
+  year               = "2020",
+  month              = "01",
+  day                = "01",
+  time               = "00:00",
+  data_format        = "grib",
+  download_format    = "unarchived",
+  target             = "era5_2m_20200101.grib"
+)
+
+era5 <- wf_request(request = request, transfer = TRUE, path = getwd())
+```
+
+### Option 4 -- Web scraping with `rvest`
+
+For tables on Wikipedia or structured public websites without an API.
+
+```{r data-scrape}
+url  <- "https://en.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal)"
+page <- read_html(url)
+
+gdp_table <- page |>
+  html_node("table.wikitable") |>
+  html_table(fill = TRUE)
+
+head(gdp_table)
+```
+
+::: {.callout-tip}
+## Document your sources
+Always include a comment in your code with the source URL and the date you downloaded the data. Your future self and any collaborators will thank you.
+
+```r
+# Source: NASA SEDAC GPW v4 population density
+# Downloaded: 2025-03-01
+# URL: https://sedac.ciesin.columbia.edu/data/set/gpw-v4-population-density-rev11
+pop <- raster(here("data", "raw", "raster", "sedac_pop_2000.TIFF"))
+```
+:::
+
+---
+
+## Opening raster data
+
+We work with two real datasets today:
+
+- **Night-time lights** from NASA (NetCDF format, `.nc`)
+- **Population density** from NASA SEDAC (GeoTIFF format, `.tif`)
+
+### Raster file formats
+
+| Format | Extension | Notes |
+|---|---|---|
+| GeoTIFF | .tif / .tiff | Simplest to work with, most common |
+| NetCDF | .nc | Multi-dimensional, common in climate/environmental data |
+| GRIB | .grib | Used by meteorological agencies |
+
+When in doubt, try `terra::rast()` -- it handles most formats.
+
+### Night-time lights (NetCDF)
+
+NetCDF files store multiple variables and dimensions. The workflow is: open the file, read the print dump to understand its structure, extract the variable of interest as an array, then convert to a raster.
+
+```{r open-nc}
+nl_15 <- nc_open(here("data", "raw", "raster", "night_light_15.nc"))
+
+# Always print first -- this tells you variable names, dimensions, fill values
+print(nl_15)
+
+# Extract coordinate vectors
+lon <- ncvar_get(nl_15, "Longitude")
+lat <- ncvar_get(nl_15, "Latitude", verbose = FALSE)
+
+# Extract the light values -- copy the variable name from the print output
+light_array <- ncvar_get(nl_15, "HRFC_COM_FR")
+dim(light_array)
+
+# Replace the fill value with proper NA
+fillvalue            <- ncatt_get(nl_15, "HRFC_COM_FR", "_FillValue")
+light_array[light_array == fillvalue$value] <- NA
+
+nc_close(nl_15)
+
+# Convert to raster
+night <- raster(
+  t(light_array),
+  xmn = min(lon), xmx = max(lon),
+  ymn = min(lat), ymx = max(lat),
+  crs = CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0")
+)
+
+# Check orientation -- if the map looks flipped, use flip()
+plot(night, main = "Night lights -- check orientation")
+night <- flip(night, direction = "y")
+plot(night, main = "Night lights -- corrected")
+
+# Save to tmp for reuse in later sessions
+writeRaster(night, here("data", "tmp", "night_light_world.tiff"), overwrite = TRUE)
+```
+
+### Population density (GeoTIFF)
+
+```{r open-tiff}
+# GeoTIFF is straightforward -- just raster()
+pop <- raster(here("data", "raw", "raster", "sedac_pop_2000.TIFF"))
+
+crs(pop)
+plot(pop, main = "World population density 2000")
+```
+
+```{r world-reference}
+# World borders for reference in plots
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+```
+
+---
+
+## Cropping and masking rasters
+
+### Crop vs mask
+
+- `crop()` cuts the raster to the **bounding box** of a reference object -- fast, but keeps a rectangular extent
+- `mask()` sets all cells **outside** the geometry to NA -- cleaner for non-rectangular regions
+
+Best practice: crop first, then mask.
+
+```{r crop-mask}
+# Keep only Italy from the world map
+ita_map <- world_map |> filter(sovereignt == "Italy")
+
+# Step 1: crop to bounding box
+ita_light <- crop(night, ita_map)
+ita_pop   <- crop(pop, ita_map)
+
+# Step 2: mask to the actual shape
+ita_light_mask <- mask(ita_light, ita_map)
+ita_pop_mask   <- mask(ita_pop, ita_map)
+
+plot(ita_light_mask, main = "Night lights -- Italy (masked)")
+plot(ita_pop_mask,   main = "Population density -- Italy (masked)")
+```
+
+---
+
+## Resampling and resolution
+
+Our two rasters have different resolutions:
+
+```{r check-res}
+res(ita_light_mask)  # coarser
+res(ita_pop_mask)    # finer
+```
+
+To do operations across both rasters, they need to match. `terra::resample()` adjusts one raster to match the resolution and extent of another using interpolation.
+
+::: {.callout-warning}
+## Resolution trade-off
+Going from fine to coarse (aggregating) loses information but is safe. Going from coarse to fine (disaggregating) creates artificial precision -- it makes the map look smoother but does not add real information.
+:::
+
+```{r resample}
+# Convert to terra for resampling
+ita_light_t <- rast(ita_light_mask)
+ita_pop_t   <- rast(ita_pop_mask)
+
+# Resample population to match the resolution of night lights
+ita_pop_resampled <- terra::resample(ita_pop_t, ita_light_t, method = "bilinear")
+
+res(ita_pop_resampled)  # should now match ita_light_t
+
+plot(ita_pop_resampled, main = "Population -- resampled to match night lights")
+```
+
+### Aggregating to a coarser resolution
+
+```{r aggregate}
+# factor = 5 means each new cell covers 5x5 original cells
+agg_pop <- aggregate(ita_pop_t, fact = 5, fun = mean, na.rm = TRUE)
+plot(agg_pop, main = "Population -- aggregated (factor 5)")
+```
+
+---
+
+## Extracting raster values to vector geometries
+
+The most common workflow in economics: you have a raster (satellite image) and you want one number per administrative unit (district, province, country). The `exactextractr` package does this efficiently and accurately.
+
+### Extract mean night light per Italian NUTS 2
+
+```{r extract-nuts2}
+# Load Italian NUTS 2 boundaries
+ita_2 <- geodata::gadm(country = "ITA", level = 2, path = tempdir()) |> st_as_sf()
+
+# Crop and mask the night light raster to Italy
+ita_night   <- crop(night, ita_2)
+ita_night_m <- mask(ita_night, ita_2)
+
+# Extract sum of night light for each polygon
+light_values <- exact_extract(ita_night_m, ita_2, "sum")
+ita_2$sum_light <- light_values
+
+hist(ita_2$sum_light, main = "Distribution of night light by NUTS 2", xlab = "Sum of light")
+
+ggplot() +
+  geom_sf(data = ita_2, aes(fill = sum_light)) +
+  scale_fill_viridis_c() +
+  labs(title = "Night light intensity by Italian NUTS 2", fill = "Sum") +
+  theme_minimal()
+```
+
+::: {.callout-tip}
+## exactextractr vs raster::extract
+`exact_extract()` is preferred because it correctly handles cells that are only partially within a polygon by weighting their contribution by the fraction of the cell area covered. This matters especially for small polygons or coarse rasters.
+
+You can extract multiple statistics at once:
+```r
+exact_extract(raster, polygons, c("sum", "mean", "median"))
+```
+:::
+
+### Extract values for a buffer around centroids
+
+A common technique in economics is to measure conditions within a certain radius of a location (e.g. distance to a port, population within 50km of a city center).
+
+```{r buffer-extract}
+# Italian NUTS 3 (provinces)
+ita_3 <- geodata::gadm(country = "ITA", level = 3, path = tempdir()) |> st_as_sf()
+
+# Compute centroids -- st_point_on_surface() ensures the point is inside the polygon
+# (st_centroid can fall outside for irregular or island polygons)
+ita_centers <- st_point_on_surface(ita_3)
+
+# Example: check the difference for a province with islands
+messina <- ita_3 |> filter(NAME_2 == "Messina")
+messina_centroid <- st_centroid(messina)
+messina_surface  <- st_point_on_surface(messina)
+
+ggplot() +
+  geom_sf(data = messina) +
+  geom_sf(data = messina_centroid, colour = "red",  size = 2) +
+  geom_sf(data = messina_surface,  colour = "blue", size = 2) +
+  labs(title = "Messina: centroid (red) vs point on surface (blue)") +
+  theme_minimal()
+
+# Create a 2km buffer around each province center
+centers_buffer <- st_buffer(ita_centers, dist = 2000)
+
+# Make sure the pop raster and the buffer have the same CRS
+ita_pop_fine <- crop(pop, ita_3) |> mask(ita_3)
+
+# Population within 2km of province center
+pop_center <- exact_extract(ita_pop_fine, centers_buffer, fun = "sum")
+pop_total  <- exact_extract(ita_pop_fine, ita_3,         fun = "sum")
+
+ita_3$pop_center    <- pop_center
+ita_3$pop_non_center <- pop_total - pop_center
+
+ggplot() +
+  geom_sf(data = ita_3, aes(fill = pop_center), colour = NA) +
+  scale_fill_viridis_c() +
+  labs(title = "Population within 2km of province centre") +
+  theme_minimal()
+```
+
+---
+
+::: {.callout-caution}
+## Exercise 1 -- Crop and mask Germany
+Using the population raster (`pop`) and the German Länder shapefile (`deu_1` from Session 2, or reload it):
+
+1. Crop the population raster to Germany.
+2. Mask it to the actual country shape.
+3. Plot the result.
+4. What is the maximum population density value in Germany? Use `cellStats(ita_pop_mask, max)` or `global(rast(pop_deu), max)`.
+:::
+
+::: {.callout-caution}
+## Exercise 2 -- Night light extraction for Saxony
+1. Filter `deu_2` (German Kreise) to keep only Saxony (`NAME_1 == "Sachsen"`).
+2. Crop and mask the night lights raster to Saxony.
+3. Extract the mean night light for each Kreis using `exact_extract()`.
+4. Plot the result as a choropleth map using `scale_fill_viridis_c()`.
+5. Which Kreis has the highest night light value? Does it make geographic sense?
+:::
+
+---
+
+## Further reading {.unnumbered}
+
+- [exactextractr documentation](https://isciences.gitlab.io/exactextractr/)
+- [NASA Earthdata search](https://search.earthdata.nasa.gov/search)
+- [NASA SEDAC population data](https://sedac.ciesin.columbia.edu/data/set/gpw-v4-population-density-rev11)
+- [Working with NetCDF in R -- RPubs tutorial](https://rpubs.com/boyerag/297592)
+- [Geocomputation with R -- Chapter 5 (geometry operations)](https://r.geocompx.org/geometry-operations)

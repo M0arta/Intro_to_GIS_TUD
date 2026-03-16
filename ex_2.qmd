@@ -1,0 +1,375 @@
+---
+title: "Session 2: Vector Operations, Administrative Boundaries and OpenStreetMaps"
+subtitle: "Introduction to GIS for Economists"
+author: "Marta Bernardi"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    df-print: paged
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+## Before we start {.unnumbered}
+
+Make sure your folder structure looks like this and that you have downloaded the required files from OPAL before the session:
+
+```         
+intro_to_gis/
+├── exercises_code/
+│   └── ex_2.qmd       <- this file goes here
+└── data/
+    └── raw/
+        ├── tram_lines.csv        <- from Session 1
+        ├── markets.csv           <- from Session 1
+        └── gadm41_DEU_shp/       <- NEW: download from OPAL
+            ├── gadm41_DEU_0.shp
+            ├── gadm41_DEU_1.shp
+            ├── gadm41_DEU_2.shp
+            ├── gadm41_DEU_3.shp
+            ├── gadm41_DEU_4.shp
+            └── ... (keep all .prj .dbf .cpg .shx files alongside each .shp)
+```
+
+::: callout-tip
+## Alternative: download GADM without uploading files
+
+You can also load administrative boundaries directly in R without downloading anything using the `geodata` package. This is shown at the end of the admin boundaries section and is useful for your own projects.
+:::
+
+```{r setup}
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  rnaturalearth,
+  rnaturalearthdata,
+  grid,
+  ggspatial,
+  gridExtra,
+  ggrepel,
+  tidygeocoder,
+  osrm,
+  geodata,
+  here,
+  terra,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_2.qmd")
+```
+
+------------------------------------------------------------------------
+
+## Administrative boundaries
+
+One of the most common tasks in applied economics is analysing phenomena across or within administrative units. Survey data are usually geo-located at this level: the dataset contains a municipality code or region name, and to bring this into a spatial framework you need to merge it with a shapefile of the corresponding administrative boundaries.
+
+### The GADM hierarchy
+
+The [GADM database](https://gadm.org/download_country.html) provides boundaries for all countries at multiple administrative levels. The naming convention is:
+
+| Level   | Typical meaning        | NUTS equivalent |
+|---------|------------------------|-----------------|
+| Admin 0 | Country                | --              |
+| Admin 1 | States / Länder        | NUTS 1          |
+| Admin 2 | Regions / Kreise       | NUTS 2          |
+| Admin 3 | Districts / Landkreise | NUTS 3          |
+| Admin 4 | Municipalities         | --              |
+
+Definitions vary by country and can change over time. Always check the `NAME_*` columns to understand what each level represents for the country you are working with.
+
+::: callout-warning
+## Shapefiles come in sets of files
+
+When opening a `.shp` file, the `.prj`, `.dbf`, `.cpg`, and `.shx` files with the same name must be in the same folder. If any of them is missing, `st_read()` will fail or return empty geometries.
+:::
+
+### Loading and plotting each level
+
+```{r admin-levels}
+deu_0 <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_0.shp"))
+deu_1 <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_1.shp"))
+deu_2 <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_2.shp"))
+deu_3 <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_3.shp"))
+deu_4 <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_4.shp"))
+
+# Check CRS -- should all be WGS84
+st_crs(deu_1)$epsg
+
+# Quick plots for each level
+ggplot() + geom_sf(data = deu_0) + labs(title = "Admin 0 -- Germany") + theme_minimal()
+ggplot() + geom_sf(data = deu_1) + labs(title = "Admin 1 -- Länder") + theme_minimal()
+ggplot() + geom_sf(data = deu_2) + labs(title = "Admin 2 -- Kreise") + theme_minimal()
+ggplot() + geom_sf(data = deu_4) + labs(title = "Admin 4 -- Municipalities") + theme_minimal()
+```
+
+### Filtering to an area of interest
+
+Because sf objects behave like data frames, you can filter them with `dplyr::filter()` using the `NAME_*` columns.
+
+```{r filter-areas}
+# List available level-1 names
+table(deu_1$NAME_1)
+
+# Keep only Saxony
+saxony <- deu_1 |> filter(NAME_1 == "Sachsen")
+ggplot() + geom_sf(data = saxony) + labs(title = "Saxony") + theme_minimal()
+
+# Keep only Dresden at the municipality level
+dresden <- deu_4 |> filter(NAME_4 == "Dresden")
+ggplot() + geom_sf(data = dresden) + labs(title = "Dresden") + theme_minimal()
+
+# Combine levels: all of Saxony at admin-4 detail, with Dresden highlighted
+saxony_4 <- deu_4 |> filter(NAME_1 == "Sachsen")
+
+ggplot() +
+  geom_sf(data = saxony_4, colour = "darkgreen", fill = NA) +
+  geom_sf(data = dresden, aes(fill = "Dresden"), colour = NA) +
+  labs(title = "Saxony at municipality level", fill = "") +
+  theme_minimal()
+```
+
+### Alternative: loading GADM directly in R
+
+```{r geodata-gadm}
+# geodata::gadm() downloads directly and returns a SpatVector
+# Use st_as_sf() to convert to sf for use with ggplot and dplyr
+deu_1_online <- geodata::gadm(country = "DEU", level = 1, path = tempdir()) |>
+  st_as_sf()
+
+# Identical result, no manual download needed
+ggplot() + geom_sf(data = deu_1_online) + theme_minimal()
+```
+
+::: callout-note
+## Which approach to use?
+
+`geodata::gadm()` is better for reproducibility since anyone can run your code. The manual download is fine for coursework. For your thesis, prefer the programmatic approach and document the download date in a comment.
+:::
+
+------------------------------------------------------------------------
+
+## Cropping to an area of interest
+
+Sometimes you want to restrict spatial data to an area defined by another spatial object rather than by an administrative name. The `terra::crop()` function cuts a spatial object to the extent of a second object.
+
+```{r crop}
+tram_lines <- read.csv(here("data", "raw", "tram_lines.csv"), sep = ";")
+tram_sf    <- st_as_sf(tram_lines, wkt = "geom")
+
+# Convert to SpatVectors for terra operations
+tram_terra    <- vect(tram_sf)
+dresden_terra <- vect(dresden)
+
+# Crop Dresden boundaries to the extent of the tram network
+area_tram       <- crop(dresden_terra, tram_terra)
+area_tram_sf    <- st_as_sf(area_tram)
+
+ggplot() +
+  geom_sf(data = dresden) +
+  geom_sf(data = area_tram_sf, fill = "steelblue", alpha = 0.4, colour = "blue") +
+  labs(title = "Dresden: area covered by trams") +
+  theme_minimal()
+```
+
+```{r add-markets}
+market    <- read.csv(here("data", "raw", "markets.csv"), sep = ";")
+market_sf <- st_as_sf(market, wkt = "geom")
+
+ggplot() +
+  geom_sf(data = dresden, colour = "grey70") +
+  geom_sf(data = area_tram_sf, colour = "steelblue", fill = NA) +
+  geom_sf(data = market_sf, colour = "firebrick", size = 2) +
+  labs(title = "Dresden: tram area and markets") +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+## Distances
+
+### Straight-line distance with `st_distance()`
+
+We will compute the distance from the Hülße-Bau building to each market. First we geocode the address using `tidygeocoder`, which queries OpenStreetMaps to return latitude and longitude.
+
+```{r geocode}
+husse_bau <- tibble::tribble(
+  ~name, ~addr,
+  "Hülße-Bau der TU Dresden", "Helmholtzstraße 10, 01069 Dresden"
+)
+
+hub_geocode <- husse_bau |>
+  geocode(addr, method = "osm", lat = latitude, long = longitude)
+
+print(hub_geocode)
+
+# Convert to sf object
+hub_sf <- st_as_sf(hub_geocode, coords = c("longitude", "latitude"), crs = 4326)
+```
+
+```{r sanity-plot}
+ggplot() +
+  geom_sf(data = dresden, colour = "grey70") +
+  geom_sf(data = area_tram_sf, colour = "steelblue", fill = NA) +
+  geom_sf(data = market_sf, colour = "firebrick") +
+  geom_sf(data = hub_sf, colour = "gold", size = 3) +
+  labs(title = "Hülße-Bau (yellow) and Dresden markets (red)") +
+  theme_minimal()
+```
+
+```{r distances}
+# Reproject to a metric CRS for accurate distance calculation
+hub_rp    <- st_transform(hub_sf, crs = 3398)
+market_rp <- st_transform(market_sf, crs = 3398)
+
+# st_distance returns a matrix (1 origin x N destinations)
+dist_matrix <- st_distance(hub_rp, market_rp)
+
+# Transpose and attach market names
+dist_df <- as.data.frame(t(dist_matrix))
+names(dist_df) <- "distance_m"
+dist_df$strasse <- market_rp$strasse
+
+dist_df |>
+  arrange(distance_m) |>
+  head(10)
+```
+
+::: callout-note
+## Projected vs geographic CRS for distances
+
+`st_distance()` works on both geographic (degrees) and projected (metres) CRS, but results differ. For distances within a city, always reproject to a local metric CRS first -- EPSG:3398 works well for Germany.
+:::
+
+------------------------------------------------------------------------
+
+## OpenStreetMaps routing with `osrm`
+
+`st_distance()` gives straight-line distance. For real travel distances and times, we can use the OpenStreetMaps routing engine through the `osrm` package.
+
+Key functions:
+
+-   `osrmTable()` -- distance or time matrix between many origins and destinations
+-   `osrmRoute()` -- the actual shortest path between two points as a LINESTRING
+-   `osrmTrip()` -- optimal tour visiting a set of locations
+
+### Travel time between markets
+
+```{r osrm-table}
+market_hub_sf <- st_as_sf(
+  left_join(dist_df, market_sf, by = "strasse")
+)
+
+travel_time <- osrmTable(loc = market_hub_sf)
+
+diag(travel_time$durations) <- NA
+cat("Median travel time between any two markets:", median(travel_time$durations, na.rm = TRUE), "minutes\n")
+```
+
+### Shortest route from the office to a market
+
+```{r osrm-route}
+alaun_platz <- market_sf |> filter(strasse == "Alaunplatz")
+
+route <- osrmRoute(src = hub_sf, dst = alaun_platz)
+
+str(route)  # LINESTRING
+
+ggplot() +
+  geom_sf(data = area_tram_sf, colour = "steelblue", fill = NA) +
+  geom_sf(data = market_sf, colour = "firebrick") +
+  geom_sf(data = hub_sf, colour = "gold", size = 3) +
+  geom_sf(data = route, colour = "forestgreen", linewidth = 1) +
+  labs(title = "Shortest route: Hülße-Bau to Alaunplatz") +
+  theme_minimal()
+```
+
+### Zooming in with buffer and centroid
+
+```{r centroid-buffer}
+center          <- st_centroid(area_tram_sf)
+buffered_area   <- st_buffer(center, dist = 8000)
+
+ggplot() +
+  geom_sf(data = buffered_area, colour = "darkgreen", fill = NA) +
+  geom_sf(data = tram_sf, colour = "steelblue", linewidth = 0.4) +
+  geom_sf(data = market_sf, colour = "firebrick") +
+  geom_sf(data = hub_sf, colour = "gold", size = 3) +
+  geom_sf(data = route, colour = "forestgreen", linewidth = 1) +
+  labs(title = "Zoomed view: 8km buffer around tram area center") +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+## Spatial joins and intersections
+
+We now find which tram line overlaps with the computed route using `st_intersection()`.
+
+```{r spatial-join}
+intersection <- st_intersection(route, tram_sf)
+
+table(intersection$strasse)
+
+ggplot() +
+  geom_sf(data = buffered_area, colour = "grey80", fill = NA) +
+  geom_sf(data = tram_sf, colour = "steelblue", linewidth = 0.4) +
+  geom_sf(data = route, colour = "forestgreen", linewidth = 1) +
+  geom_sf(data = intersection, colour = "orchid", size = 3) +
+  labs(title = "Route / tram line intersection (pink points)") +
+  theme_minimal()
+```
+
+::: callout-note
+## st_intersects vs st_intersection
+
+`st_intersects()` returns a logical: do these two geometries overlap? `st_intersection()` returns the actual geometry of the overlap. Use the former for filtering, the latter when you need the overlapping shape itself.
+:::
+
+------------------------------------------------------------------------
+
+::: callout-caution
+## Exercise 1 -- Admin boundaries
+
+Using `deu_2` (Kreise level):
+
+1.  Filter to keep only the Kreise belonging to Saxony (`NAME_1 == "Sachsen"`).
+2.  Plot them coloured by `NAME_2`.
+3.  Compute the centroid of each Kreis using `st_centroid()` and add them as points on the same map.
+4.  How many Kreise does Saxony have? Use `nrow()`.
+:::
+
+::: callout-caution
+## Exercise 2 -- Distance from your location
+
+Pick any address in Dresden that is meaningful to you (where you live, your favourite café, etc.).
+
+1.  Geocode it using `tidygeocoder`.
+2.  Compute the straight-line distance to all markets.
+3.  Find the nearest market and compute the `osrmRoute()` to it.
+4.  Plot the route on top of the tram network.
+:::
+
+------------------------------------------------------------------------
+
+## Further reading {.unnumbered}
+
+-   [GADM download page](https://gadm.org/download_country.html)
+-   [osrm package documentation](https://github.com/riatelab/osrm)
+-   [tidygeocoder documentation](https://cran.r-project.org/web/packages/tidygeocoder/readme/README.html)
+-   [Geocomputation with R -- Chapter 4 (spatial operations)](https://r.geocompx.org/spatial-operations)

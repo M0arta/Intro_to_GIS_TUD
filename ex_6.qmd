@@ -1,0 +1,374 @@
+---
+title: "Session 6: Spatial Inference and Course Recap"
+subtitle: "Introduction to GIS for Economists"
+author: "Marta Bernardi"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    df-print: paged
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+## Before we start {.unnumbered}
+
+This session reuses saved outputs from earlier sessions. Make sure the following files are in place before we begin:
+
+```
+intro_to_gis/
+├── exercises_code/
+│   └── ex_6.qmd
+└── data/
+    ├── raw/
+    │   ├── raster/
+    │   │   └── sedac_pop_2000.TIFF          <- from Session 3
+    │   └── gadm41_DEU_shp/                  <- from Session 2
+    └── tmp/
+        └── january_rain.tif                 <- saved in Session 5
+```
+
+The `spDataLarge` package used in the spatial cross-validation section loads its data directly from R -- no download needed.
+
+```{r setup}
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  terra,
+  exactextractr,
+  fixest,
+  conleyreg,
+  broom,
+  pROC,
+  mlr3,
+  mlr3learners,
+  mlr3extralearners,
+  mlr3spatiotempcv,
+  mlr3tuning,
+  mlr3viz,
+  progressr,
+  lgr,
+  spDataLarge,
+  here,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_6.qmd")
+```
+
+---
+
+## Why does geography complicate inference?
+
+When you run a regression with spatial data, standard errors assume observations are independent. But observations close to each other in space tend to be similar -- a village near a city inherits some of the city's economic conditions, a municipality downstream of a factory shares some of its pollution. This is **spatial autocorrelation**, and ignoring it leads to standard errors that are too small, confidence intervals that are too narrow, and p-values that are too optimistic.
+
+There are two main strategies economists use to deal with this:
+
+1. **Conley standard errors**: adjust the variance-covariance matrix to account for correlation that decays with geographic distance, analogous to Newey-West for time series.
+
+2. **Spatial cross-validation**: when evaluating prediction models, use spatially partitioned folds so that training and test observations are not geographically adjacent (and therefore not artificially similar to each other).
+
+---
+
+## Conley standard errors
+
+### Setup: population and rainfall in Germany
+
+We will ask a simple question: is mean January rainfall negatively correlated with population density across German districts (Kreise)? The hypothetical story is that people are less likely to settle in rainy places. This is of course a toy example -- the point is to see what Conley errors do to inference.
+
+```{r load-data}
+pop      <- raster(here("data", "raw", "raster", "sedac_pop_2000.TIFF"))
+jan_rain <- raster(here("data", "tmp", "january_rain.tif"))
+deu_2    <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_2.shp"))
+
+deu_2$pop  <- exact_extract(pop,      deu_2, fun = "mean")
+deu_2$rain <- exact_extract(jan_rain, deu_2, fun = "mean")
+
+summary(deu_2[, c("pop", "rain")])
+```
+
+### OLS baseline
+
+```{r ols}
+ols <- feols(pop ~ rain, data = deu_2)
+etable(ols)
+```
+
+### Conley standard errors
+
+`conleyreg()` takes the same formula and data as a standard `lm()`, plus a distance cutoff (in kilometres) within which you believe spatial correlation is meaningful. Observations further apart than this cutoff are treated as independent.
+
+Choosing the right cutoff is a substantive decision -- it should reflect the geographic scale of the mechanism you are worried about. A reasonable default is the mean distance between neighbouring units, but you should check robustness across different values.
+
+```{r conley}
+# cutoff = 100km
+conley_100 <- conleyreg(pop ~ rain, data = deu_2, 100)
+print(conley_100)
+
+# cutoff = 50km
+conley_50  <- conleyreg(pop ~ rain, data = deu_2, 50)
+
+# cutoff = 20km
+conley_20  <- conleyreg(pop ~ rain, data = deu_2, 20)
+```
+
+### Comparing standard errors visually
+
+```{r coef-plot}
+# Clustered SE at the district level as an additional comparison
+ols_cluster <- feols(pop ~ rain, data = deu_2, cluster = "NAME_2")
+
+# Extract coefficients for the rain term
+coef_df <- bind_rows(
+  broom::tidy(ols,         conf.int = TRUE) |> filter(term == "rain") |> mutate(model = "OLS"),
+  broom::tidy(ols_cluster, conf.int = TRUE) |> filter(term == "rain") |> mutate(model = "OLS clustered"),
+  broom::tidy(conley_100,  conf.int = TRUE) |> filter(term == "rain") |> mutate(model = "Conley 100km"),
+  broom::tidy(conley_50,   conf.int = TRUE) |> filter(term == "rain") |> mutate(model = "Conley 50km"),
+  broom::tidy(conley_20,   conf.int = TRUE) |> filter(term == "rain") |> mutate(model = "Conley 20km")
+)
+
+coef_df$model <- factor(coef_df$model,
+                        levels = c("OLS", "OLS clustered",
+                                   "Conley 20km", "Conley 50km", "Conley 100km"))
+
+ggplot(coef_df, aes(x = model, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size = 0.7) +
+  labs(
+    x     = NULL,
+    y     = "Coefficient on rain",
+    title = "Effect of January rainfall on population density",
+    subtitle = "OLS vs Conley standard errors at different distance cutoffs"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+::: {.callout-note}
+## What to look for in this plot
+The point estimate (the dot) does not change across specifications -- Conley errors only affect the standard errors, not the coefficients. What changes is the width of the confidence interval. If the interval grows substantially when you apply Conley errors, your baseline inference was too optimistic. If it barely changes, spatial autocorrelation was not a major problem for this regression.
+:::
+
+---
+
+::: {.callout-caution}
+## Exercise -- Sensitivity analysis
+The choice of distance cutoff is always somewhat arbitrary. Your task is to investigate how sensitive the inference is.
+
+1. Run Conley errors at cutoffs: 10, 30, 50, 75, 100, 150, 200 km.
+2. Extract the standard error for the `rain` coefficient at each cutoff.
+3. Plot the SE against the cutoff distance. Does it stabilise at some point?
+4. At which cutoff (if any) does the result become statistically insignificant?
+:::
+
+---
+
+## Spatial cross-validation (run at home)
+
+::: {.callout-important}
+## Run at home
+This section runs 500 model fits and takes several minutes. We will walk through the code together in class but not execute it live. Run it at home and bring the output to the next session.
+:::
+
+### Why standard cross-validation fails for spatial data
+
+In a standard k-fold cross-validation, observations are randomly split into folds. For spatial data this is a problem: a training observation in fold 1 might be 200 metres from a test observation in fold 5. Because nearby locations are similar, the model effectively gets a "preview" of the test set during training, leading to overly optimistic accuracy estimates.
+
+**Spatial CV** solves this by splitting into folds based on geographic location (k-means clustering on coordinates), ensuring that training and test sets are spatially separated.
+
+### Case study: landslide susceptibility in Ecuador
+
+We use a dataset from the `spDataLarge` package with terrain attributes and known landslide locations in Southern Ecuador.
+
+```{r data-overview, eval=FALSE}
+data("lsl", "study_mask", package = "spDataLarge")
+ta <- terra::rast(system.file("raster/ta.tif", package = "spDataLarge"))
+
+# The outcome: 1 = landslide-susceptible point, 0 = stable point
+table(lsl$lslpts)
+
+# Predictors: slope, plan curvature, profile curvature, elevation, log catchment area
+head(lsl)
+
+lsl_sf       <- st_as_sf(lsl, coords = c("x", "y"))
+st_crs(lsl_sf) <- crs(study_mask)
+
+ggplot() +
+  geom_sf(data = study_mask) +
+  geom_sf(data = lsl_sf, aes(colour = factor(lslpts)), size = 1) +
+  scale_colour_manual(values = c("0" = "grey60", "1" = "firebrick"),
+                      labels = c("Stable", "Landslide"), name = "") +
+  labs(title = "Landslide susceptibility study area, Ecuador") +
+  theme_minimal()
+```
+
+### Step 1 -- Baseline GLM and spatial prediction
+
+```{r glm-predict, eval=FALSE}
+fit <- glm(lslpts ~ slope + cplan + cprof + elev + log10_carea,
+           family  = binomial(),
+           data    = lsl)
+
+summary(fit)
+
+# Apply the model spatially using terra::predict()
+pred       <- terra::predict(ta, model = fit, type = "response")
+mask_pred  <- mask(pred, study_mask)
+
+plot(mask_pred, main = "Predicted landslide probability")
+```
+
+### Step 2 -- AUROC on the full dataset (biased estimate)
+
+```{r auroc-full, eval=FALSE}
+pROC::auc(pROC::roc(lsl$lslpts, fitted(fit)))
+# A good-looking number -- but computed on training data, so optimistic
+```
+
+### Step 3 -- Spatial cross-validation with mlr3
+
+The mlr3 workflow has three building blocks:
+
+1. A **task**: what data, what outcome, what type of problem?
+2. A **learner**: which algorithm?
+3. A **resampling**: how do we split the data for evaluation?
+
+```{r spatial-cv, eval=FALSE}
+# Suppress verbose output
+lgr::get_logger("mlr3")$set_threshold("warn")
+
+# 1 -- Task
+task <- mlr3spatiotempcv::as_task_classif_st(
+  mlr3::as_data_backend(lsl),
+  target           = "lslpts",
+  id               = "ecuador_lsl",
+  positive         = "TRUE",
+  coordinate_names = c("x", "y"),
+  crs              = "EPSG:32717",
+  coords_as_features = FALSE
+)
+
+# Quick look at predictor vs response relationships
+mlr3viz::autoplot(task, type = "duo")
+mlr3viz::autoplot(task, type = "pairs")
+
+# 2 -- Learner: logistic regression
+learner <- mlr3::lrn("classif.log_reg", predict_type = "prob")
+
+# 3 -- Resampling: 100-repeated 5-fold spatial CV
+resampling <- mlr3::rsmp("repeated_spcv_coords", folds = 5, repeats = 100)
+
+# Run (this fits 500 models -- takes several minutes)
+rr <- mlr3::resample(task = task, learner = learner, resampling = resampling)
+
+# Extract AUROC for each of the 500 runs
+scores <- rr$score(measure = mlr3::msr("classif.auc")) |>
+  select(task_id, learner_id, resampling_id, classif.auc)
+
+# Bias-corrected performance estimate
+cat("Spatially CV AUROC:", round(mean(scores$classif.auc), 3), "\n")
+cat("Compare with naive AUROC on full data: ~0.82\n")
+cat("The difference is the optimism bias from ignoring spatial autocorrelation.\n")
+```
+
+::: {.callout-note}
+## What to expect
+The spatially cross-validated AUROC will be lower than 0.82. This is not a worse model -- it is a more honest assessment of how well the model generalises to new, geographically independent locations. The naive AUROC was inflated because training and test sets were spatially adjacent.
+:::
+
+---
+
+## Course recap
+
+### What we covered
+
+Over these six sessions you have built a complete toolkit for using geographic data in economic research:
+
+| Session | Core skill |
+|---|---|
+| 1 | Vector data, sf objects, CRS, projections |
+| 2 | Admin boundaries, spatial filtering, distances, OSM routing |
+| 3 | Raster data formats, crop, mask, resample, exact extraction, getting data from the internet |
+| 4 | Map algebra, reclassification, focal operations, population weighting |
+| 5 | Cartograms, tmap, animated and interactive maps |
+| 6 | Conley standard errors, spatial cross-validation |
+
+### A typical research workflow
+
+Most applied economics projects that use geo-data follow this pattern:
+
+```
+1. Collect unit-level data (survey, admin records)
+      |
+      v
+2. Match to administrative boundaries (GADM shapefiles + st_join)
+      |
+      v
+3. Download raster data for covariates (NASA, Copernicus, NOAA)
+      |
+      v
+4. Extract raster values to your units (exact_extract)
+      |
+      v
+5. Build your regression dataset (merge, dplyr)
+      |
+      v
+6. Run regressions with appropriate spatial inference (feols + conleyreg)
+      |
+      v
+7. Map your results (ggplot geom_sf or tmap)
+```
+
+Steps 2-4 are entirely what this course has been about. The rest is standard econometrics.
+
+### Common pitfalls to avoid
+
+**CRS mismatches.** Always check `st_crs()` before any spatial join or extraction. If two objects have different CRS values, use `st_transform()` to align them.
+
+**Resolution mismatch.** Before doing any raster arithmetic or extraction across multiple rasters, confirm they have the same resolution with `res()`. Use `terra::resample()` if they differ.
+
+**Optimistic standard errors.** If your observations have any geographic structure, default standard errors are likely too small. At minimum, cluster at the relevant geographic level. Consider Conley errors if the geographic scale of spillovers is meaningful for your setting.
+
+**Population weighting.** A mean extracted from a raster is an area-weighted average. If you care about conditions experienced by people rather than land area, use population-weighted extraction.
+
+**Shapefile vintage.** Administrative boundaries change over time. Make sure the GADM version you use matches the period of your survey data.
+
+### Where to go next
+
+- [Geocomputation with R](https://r.geocompx.org) -- the most complete reference for everything in this course and much more
+- [Earth Data Science tutorials](https://www.earthdatascience.org) -- practical tutorials on satellite imagery and remote sensing in R and Python
+- [Spatial econometrics in R -- spdep package](https://r-spatial.github.io/spdep/) -- spatial weights matrices, Moran's I, spatial lag and error models
+- [conleyreg vignette](https://cran.r-project.org/web/packages/conleyreg/vignettes/conleyreg_introduction.html) -- full documentation on Conley standard errors
+- [mlr3 spatial book](https://mlr3book.mlr-org.com) -- full reference for the mlr3 ecosystem
+
+---
+
+## Final open exercise {.unnumbered}
+
+::: {.callout-caution}
+## Putting it all together
+Using any country of your choice (not Germany or Italy):
+
+1. Download admin boundaries at two levels using `geodata::gadm()`.
+2. Download the population raster from SEDAC or use the one already loaded.
+3. Crop and mask the population raster to your country.
+4. Extract mean population for each unit at the finer admin level.
+5. Make a tmap choropleth with a sensible colour scale and layout.
+6. Run a simple OLS regression of population on latitude (extract the centroid latitude of each unit with `st_coordinates(st_centroid(data))`).
+7. Re-run with Conley standard errors at a cutoff of your choice. Does it change your inference?
+:::

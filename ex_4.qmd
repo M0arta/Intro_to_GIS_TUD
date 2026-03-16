@@ -1,0 +1,375 @@
+---
+title: "Session 4: Map Algebra and Population Weighting"
+subtitle: "Introduction to GIS for Economists"
+author: "Marta Bernardi"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    df-print: paged
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+## Before we start {.unnumbered}
+
+This session reuses outputs saved in `data/tmp/` from Session 3. Make sure you have run Session 3 and that the following files exist:
+
+```
+intro_to_gis/
+├── exercises_code/
+│   └── ex_4.qmd
+└── data/
+    ├── raw/
+    │   ├── raster/
+    │   │   └── sedac_pop_2000.TIFF      <- from Session 3
+    │   ├── gadm41_ITA_shp/              <- from Session 3
+    │   └── gadm41_DEU_shp/              <- from Session 2
+    └── tmp/
+        └── night_light_world.tiff       <- SAVED in Session 3 (writeRaster)
+```
+
+If you do not have `night_light_world.tiff`, go back to Session 3 and run the NetCDF section to recreate it.
+
+```{r setup}
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  terra,
+  exactextractr,
+  rnaturalearth,
+  rnaturalearthdata,
+  geodata,
+  here,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_4.qmd")
+```
+
+```{r load-data}
+# Reload the data we need for this session
+night   <- raster(here("data", "tmp", "night_light_world.tiff"))
+pop     <- raster(here("data", "raw", "raster", "sedac_pop_2000.TIFF"))
+
+ita_2 <- geodata::gadm(country = "ITA", level = 2, path = tempdir()) |> st_as_sf()
+ita_3 <- geodata::gadm(country = "ITA", level = 3, path = tempdir()) |> st_as_sf()
+
+# Crop and mask Italy
+ita_light <- crop(night, ita_2) |> mask(ita_2)
+ita_pop   <- crop(pop,   ita_2) |> mask(ita_2)
+
+# Resample to same resolution (match pop to night lights)
+ita_light_t <- rast(ita_light)
+ita_pop_t   <- rast(ita_pop)
+ita_pop_t   <- terra::resample(ita_pop_t, ita_light_t, method = "bilinear")
+
+# Convert back to raster for operations in this session
+ita_light_r <- raster(ita_light_t)
+ita_pop_r   <- raster(ita_pop_t)
+
+cat("Both rasters at same resolution:", identical(res(ita_light_r), res(ita_pop_r)), "\n")
+```
+
+---
+
+## Spatial vector operations
+
+Before going into raster algebra, we review the key topological operations on vector data. These are building blocks for merging and filtering spatial datasets.
+
+### Topological relations
+
+```{r topological}
+# Create simple test geometries
+polygon1 <- st_polygon(list(rbind(c(0,0), c(0.5,0), c(0.5,0.5), c(0,0.5), c(0,0))))
+polygon2 <- st_polygon(list(rbind(c(0.5,0.5), c(1.5,0.5), c(0.8,0.8), c(0.5,0.8), c(0.5,0.5))))
+point    <- st_point(c(0.5, 0.5))
+
+# Visualise
+bbox <- st_bbox(st_union(polygon1, polygon2))
+plot(polygon1, col = "lightblue",  xlim = c(bbox["xmin"], bbox["xmax"]), ylim = c(bbox["ymin"], bbox["ymax"]))
+plot(polygon2, col = "lightgreen", add = TRUE)
+plot(point,    col = "red", pch = 19, cex = 2, add = TRUE)
+
+# Is the point within either polygon?
+st_within(point, polygon1)  # empty list = FALSE
+st_within(point, polygon2)  # empty list = FALSE
+
+# Do the two polygons touch?
+st_touches(polygon1, polygon2)  # list(1) = TRUE -- they share the corner (0.5, 0.5)
+
+# Is the point within 0.5 units of either polygon?
+st_is_within_distance(point, polygon1, dist = 0.5)
+st_is_within_distance(point, polygon2, dist = 0.5)
+
+# Are the two polygons disjoint? (no shared area)
+st_disjoint(polygon1, polygon2)
+```
+
+### Spatial joins
+
+```{r spatial-joins}
+# st_intersects: logical -- do they share any space?
+st_intersects(point, polygon1)
+
+# st_intersection: returns the actual overlapping geometry
+intersection_result <- st_intersection(point, polygon1)
+str(intersection_result)
+
+# st_join: attribute join based on spatial overlap
+# (demonstrated on real data below with the Germany example)
+```
+
+::: {.callout-note}
+## Key topological functions summary
+| Function | Returns | Use case |
+|---|---|---|
+| `st_within()` | TRUE/FALSE | Is A completely inside B? |
+| `st_touches()` | TRUE/FALSE | Do A and B share a boundary but not interior? |
+| `st_intersects()` | TRUE/FALSE | Do A and B share any space? |
+| `st_intersection()` | geometry | The overlapping region itself |
+| `st_is_within_distance()` | TRUE/FALSE | Is A within X metres of B? |
+| `st_disjoint()` | TRUE/FALSE | Do A and B share no space at all? |
+:::
+
+---
+
+## Map algebra with raster data
+
+Rasters store coordinates implicitly (computed from origin, resolution, and cell position). This means cells with the same position in two rasters with identical extent and resolution correspond to the same geographic location -- we can do direct cell-to-cell arithmetic.
+
+### Local operations: per-cell computations
+
+#### Reclassification
+
+Reclassify converts continuous values into discrete categories. This is useful for creating categorical variables from rasters (e.g. low/medium/high population density).
+
+```{r reclassify}
+# Create an example raster with random values between 0 and 1
+r <- raster(ncols = 36, nrows = 18)
+values(r) <- runif(ncell(r))
+
+# Define the reclassification table: (from, to, new_value)
+# Values 0-0.25 -> 1, 0.25-0.5 -> 2, 0.5-1 -> 3
+rcl_matrix <- matrix(c(0, 0.25, 1,
+                        0.25, 0.5, 2,
+                        0.5,  1,   3),
+                     ncol = 3, byrow = TRUE)
+
+rc <- reclassify(r, rcl_matrix)
+
+par(mfrow = c(1, 2))
+plot(r,  main = "Original (continuous)")
+plot(rc, main = "Reclassified (3 categories)")
+par(mfrow = c(1, 1))
+```
+
+#### NDVI calculation
+
+NDVI (Normalised Difference Vegetation Index) is one of the most used raster operations in economics papers. It measures vegetation health from satellite imagery using near-infrared (NIR) and red bands.
+
+NDVI = (NIR -- Red) / (NIR + Red), ranging from -1 to 1 where values above 0.3 indicate healthy vegetation.
+
+```{r ndvi}
+# Simulate NIR and Red bands
+nir <- raster(ncols = 10, nrows = 10)
+red <- raster(ncols = 10, nrows = 10)
+values(nir) <- runif(ncell(nir))
+values(red) <- runif(ncell(red))
+
+# Calculate NDVI using direct algebraic operations
+ndvi <- (nir - red) / (nir + red)
+
+par(mfrow = c(1, 3))
+plot(nir,  main = "NIR band")
+plot(red,  main = "Red band")
+plot(ndvi, main = "NDVI")
+par(mfrow = c(1, 1))
+```
+
+::: {.callout-tip}
+## NDVI in economics
+NDVI is widely used as a proxy for agricultural productivity, vegetation cover, and land use. See [earthdatascience.org](https://www.earthdatascience.org/courses/earth-analytics/multispectral-remote-sensing-data/vegetation-indices-NDVI-in-R/) for a full tutorial on computing NDVI from real satellite imagery.
+:::
+
+### Focal operations: neighbourhood computations
+
+Focal operations apply a function to a moving window around each cell. The most common use case is spatial smoothing: replacing each cell's value with a weighted average of its neighbours.
+
+```{r focal}
+r_focal <- raster(ncols = 12, nrows = 6, xmn = 0)
+values(r_focal) <- runif(ncell(r_focal))
+
+# Standard 3x3 mean filter: each cell becomes the mean of itself + 8 neighbours
+r3 <- focal(r_focal, w = matrix(1/9, nrow = 3, ncol = 3))
+
+# Larger 5x5 mean filter: smoother
+r5 <- focal(r_focal, w = matrix(1/25, nrow = 5, ncol = 5))
+
+# Gaussian filter: weighted smoothing (nearby cells contribute more)
+gf <- focalWeight(r_focal, 2, "Gauss")
+rg <- focal(r_focal, w = gf)
+
+par(mfrow = c(2, 2))
+plot(r_focal, main = "Original",       col = rainbow(100))
+plot(r3,      main = "3x3 mean",       col = rainbow(100))
+plot(r5,      main = "5x5 mean",       col = rainbow(100))
+plot(rg,      main = "Gaussian filter",col = rainbow(100))
+par(mfrow = c(1, 1))
+```
+
+### Zonal operations
+
+Zonal operations summarise cell values within irregular zones. Unlike `exact_extract()` which works from a polygon vector object, `zonal()` uses another raster as the zone definition.
+
+```{r zonal}
+# Reclassify population into 3 density categories
+pop_summary <- summary(ita_pop_r)
+print(pop_summary)
+
+rcl_pop <- matrix(c(0,   100, 1,
+                     100, 150, 2,
+                     150, 300, 3),
+                  ncol = 3, byrow = TRUE)
+
+pop_categories <- reclassify(ita_pop_r, rcl_pop)
+
+# Compute mean night light for each population density category
+z <- zonal(ita_light_r, pop_categories, fun = "mean", na.rm = TRUE) |>
+  as.data.frame()
+
+print(z)
+# We expect denser areas (higher zone number) to have higher night light
+```
+
+---
+
+## Population weighting
+
+A very common technique in applied economics: you have a raw measure (e.g. night light) per geographic unit, but you want to account for where people actually live within that unit. A sparsely populated mountain area and a densely populated city centre are treated equally by a simple mean -- population weighting corrects for this.
+
+**The idea:**
+
+1. Multiply the night light raster by the population raster cell by cell
+2. Extract the resulting weighted sum for each geographic unit
+3. Normalise by the total population of a reference unit (e.g. NUTS 2)
+
+This gives you night light per inhabitant, properly accounting for intra-unit population distribution.
+
+```{r pop-weighting}
+# Step 1: cell-by-cell multiplication
+pop_x_light <- ita_light_r * ita_pop_r
+
+# Step 2: extract sums at NUTS 3 level
+light_values    <- exact_extract(ita_light_r, ita_3, "sum")
+weighted_values <- exact_extract(pop_x_light, ita_3, "sum")
+
+ita_3$light          <- light_values
+ita_3$weighted_light <- weighted_values
+
+# Step 3: normalise within NUTS 2 (so units are comparable across regions)
+ita_3 <- ita_3 |>
+  group_by(NAME_2) |>
+  mutate(nuts2_total = sum(weighted_light, na.rm = TRUE)) |>
+  ungroup() |>
+  mutate(norm_light = weighted_light / nuts2_total)
+
+# Compare: raw vs population-weighted
+p_raw <- ggplot() +
+  geom_sf(data = ita_3, aes(fill = light), colour = NA) +
+  scale_fill_viridis_c() +
+  labs(title = "Raw night light (sum)") +
+  theme_minimal()
+
+p_weighted <- ggplot() +
+  geom_sf(data = ita_3, aes(fill = norm_light), colour = NA) +
+  scale_fill_viridis_c() +
+  labs(title = "Population-weighted night light") +
+  theme_minimal()
+
+gridExtra::grid.arrange(p_raw, p_weighted, ncol = 2)
+```
+
+::: {.callout-note}
+## Why does population weighting matter?
+The raw night light map highlights which provinces have large absolute totals -- often just the physically larger ones. The population-weighted version corrects for this and reveals something more like economic activity per person. This is analogous to reporting GDP per capita instead of total GDP.
+:::
+
+---
+
+## Spatial data aggregation
+
+Sometimes you need to aggregate from a finer to a coarser spatial unit. In sf, you can dissolve polygons and compute statistics across them using `aggregate()`.
+
+```{r aggregation}
+deu_2 <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_2.shp"))
+
+pop_deu   <- crop(pop, deu_2) |> mask(deu_2)
+pop_deu_t <- rast(pop_deu)
+
+# Extract mean population for each Kreis
+deu_2$pop <- exact_extract(pop_deu, deu_2, fun = "mean", coverage_area = TRUE)
+
+ggplot() +
+  geom_sf(data = deu_2, aes(fill = pop), colour = NA) +
+  scale_fill_viridis_c() +
+  labs(title = "Mean population density by German Kreis (NUTS 2)") +
+  theme_minimal()
+
+# Aggregate from Kreis to Länder by summing population
+deu_1 <- st_read(here("data", "raw", "gadm41_DEU_shp", "gadm41_DEU_1.shp"))
+
+deu_1$pop <- exact_extract(pop_deu, deu_1, fun = "mean", coverage_area = TRUE)
+
+ggplot() +
+  geom_sf(data = deu_1, aes(fill = pop), colour = NA) +
+  scale_fill_viridis_c() +
+  labs(title = "Mean population density by German Land (NUTS 1)") +
+  theme_minimal()
+```
+
+---
+
+::: {.callout-caution}
+## Exercise 1 -- Reclassify night lights
+Using `ita_light_r` (Italian night lights, already loaded):
+
+1. Look at the distribution with `hist(ita_light_r)` and choose 3 sensible breaks.
+2. Reclassify into 3 categories: low, medium, high light.
+3. Plot the reclassified raster.
+4. Using `zonal()`, compute the mean population (`ita_pop_r`) for each light category. What do you find?
+:::
+
+::: {.callout-caution}
+## Exercise 2 -- Population-weighted light for Germany
+Repeat the population weighting workflow for Germany:
+
+1. Load `deu_2` and crop/mask both `night` and `pop` to Germany.
+2. Resample population to match night lights resolution.
+3. Compute `pop_x_light` and extract weighted sums for each Kreis.
+4. Normalise within each Land (`NAME_1`).
+5. Compare the raw and weighted maps side by side. Which Länder change the most after weighting?
+:::
+
+---
+
+## Further reading {.unnumbered}
+
+- [Geocomputation with R -- Chapter 4 (spatial data operations)](https://r.geocompx.org/spatial-operations)
+- [NDVI tutorial -- Earth Data Science](https://www.earthdatascience.org/courses/earth-analytics/multispectral-remote-sensing-data/vegetation-indices-NDVI-in-R/)
+- [exactextractr -- advanced extraction options](https://isciences.gitlab.io/exactextractr/)

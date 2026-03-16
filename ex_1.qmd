@@ -1,0 +1,448 @@
+---
+title: "Session 1: GIS in R, Setup and Fundamentals"
+subtitle: "Introduction to GIS for Economists"
+author: "Marta Bernardi"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    df-print: paged
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+## Before we start {.unnumbered}
+
+Make sure your folder structure looks like this before running anything:
+
+```         
+intro_to_gis/
+├── exercises_code/
+│   └── ex_1.qmd       <- this file goes here
+└── data/
+    └── raw/
+        ├── tram_lines.csv
+        └── markets.csv
+```
+
+Download the data files from OPAL and place them in `data/raw/` before the session.
+
+### Packages for this session {.unnumbered}
+
+```{r setup}
+library(pacman)
+
+pacman::p_load(
+  ggplot2,
+  dplyr,
+  sf,
+  raster,
+  rnaturalearth,
+  rnaturalearthdata,
+  here,
+  terra,
+  tidyr
+)
+
+here::i_am("exercises_code/ex_1.qmd")
+```
+
+------------------------------------------------------------------------
+
+## Vector data and the `sf` package
+
+### What is vector data?
+
+Geographic vector data represent features in space using **points**, **lines**, and **polygons** — all defined within a Coordinate Reference System (CRS).
+
+| Geometry type       | Built from                   | Example                     |
+|---------------------|------------------------------|-----------------------------|
+| Point               | A single coordinate pair     | A market location           |
+| Linestring          | Two or more connected points | A tram line                 |
+| Polygon             | A closed sequence of points  | A district boundary         |
+| Geometry collection | Mix of the above             | A city with roads and parks |
+
+Every spatial object carries a `geometry` column containing coordinate pairs (longitude, latitude).
+
+### The `sf` package
+
+The **simple features** (`sf`) package is the standard for working with vector data in R. It supports 17 geometry types and integrates naturally with `dplyr` and `ggplot2`.
+
+Key geometry constructor functions:
+
+-   `st_point()` — creates a point from a numeric vector
+-   `st_linestring()` — creates a line from a matrix of coordinates
+-   `st_polygon()` — creates a polygon from a list of coordinate matrices
+-   `st_multipoint()`, `st_multilinestring()` — multi-part variants
+-   `st_sfc()` — combines geometries into a simple feature column
+-   `st_sf()` — combines an `sfc` with a data frame to make a full spatial dataset
+
+### Creating geometries from scratch
+
+```{r geometries}
+# --- Points (from numeric vectors) ---
+p_1 <- st_point(c(5, 2))          # 2D point (X, Y)
+p_2 <- st_point(c(7, 3, 5))       # 3D point (X, Y, Z)
+p_3 <- st_point(c(8, 1, 4), dim = "XYM")    # X, Y + measure
+p_4 <- st_point(c(6, 3, 5, 9), dim = "XYZM") # X, Y, Z + measure
+
+# --- Multipoints (from a matrix) ---
+multi_point_matrix <- rbind(c(4, 5), c(6, 4), c(9, 5))
+multipoint <- st_multipoint(multi_point_matrix)
+plot(multipoint, main = "Multipoint")
+
+# --- Linestring (from a matrix) ---
+line_matrix <- rbind(c(4, 5), c(6, 4), c(9, 5))
+linestring <- st_linestring(line_matrix)
+plot(linestring, main = "Linestring")
+
+# --- Polygon with a hole (from a list of matrices) ---
+border <- rbind(c(1, 5), c(2, 2), c(4, 1), c(4, 4), c(1, 5))
+hole   <- rbind(c(2, 4), c(3, 4), c(3, 3), c(2, 3), c(2, 4))
+polygon <- st_polygon(list(border, hole))
+plot(polygon, main = "Polygon with hole")
+
+# --- Geometry collection ---
+geom_collection <- st_geometrycollection(list(multipoint, linestring))
+plot(geom_collection, main = "Geometry collection")
+```
+
+### Simple feature columns (`sfc`)
+
+An `sfc` object is a list of geometries sharing the same CRS — it is the `geometry` column of any spatial data frame.
+
+```{r sfc}
+# Combine two points into a single sfc
+points_sfc <- st_sfc(p_1, p_2)
+print(points_sfc)
+
+# Always useful: check the geometry type of any spatial object
+st_geometry_type(linestring)
+st_geometry_type(polygon)
+```
+
+::: callout-note
+## Quick check
+
+What does `st_geometry_type(geom_collection)` return? Run it and think about why.
+:::
+
+------------------------------------------------------------------------
+
+## Coordinate Reference Systems (CRS)
+
+A CRS defines how coordinates map onto the Earth's surface. Two broad families:
+
+-   **Geographic CRS** (e.g. WGS84 / EPSG:4326): coordinates in degrees of latitude and longitude. Standard in economics and most global datasets.
+-   **Projected CRS** (e.g. ESRI:54009 Mollweide): coordinates in metres on a flat surface. Better for distance calculations and area measurements.
+
+### Checking and setting a CRS
+
+```{r projections}
+# Default CRS is NA — no projection assigned yet
+st_crs(multipoint)
+
+# Wrap in sfc first, then assign WGS84
+multipoint_sfc <- st_sfc(multipoint)
+multipoint_wgs <- st_set_crs(multipoint_sfc, 4326)
+st_crs(multipoint_wgs)
+```
+
+::: callout-warning
+## st_set_crs() vs st_transform()
+
+`st_set_crs()` **assigns** a CRS without touching the coordinates — use it only when the data has no CRS at all.\
+`st_transform()` **reprojects** the coordinates from one CRS to another — use this when you need to change projection.\
+Confusing the two is a very common source of silent errors.
+:::
+
+### Reprojecting a world map
+
+```{r reprojections}
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Default CRS
+st_crs(world_map)$epsg
+
+# Plot in default WGS84
+plot(world_map["sovereignt"], main = "WGS84 (EPSG:4326)")
+
+# Reproject to Mollweide equal-area projection
+world_mollweide <- st_transform(world_map, crs = "ESRI:54009")
+plot(world_mollweide["sovereignt"], main = "Mollweide (ESRI:54009)")
+```
+
+::: callout-tip
+## Why does projection matter in economics?
+
+If you are computing distances, areas, or spatial weights matrices, the results will differ depending on the CRS. WGS84 works well for global visualisations; for area calculations within a country, a local projected CRS (e.g. ETRS89 for Germany) is more appropriate.
+:::
+
+------------------------------------------------------------------------
+
+## Working with real data — Dresden
+
+We use data from the [Dresden Open Data Portal](https://opendata.dresden.de/informationsportal/). The datasets contain a column called `geom` storing geometries in **WKT (Well-Known Text)** format, which `sf` can read directly.
+
+### Tram lines
+
+```{r tram-data}
+# Load the CSV — note the semicolon separator
+tram_lines <- read.csv(here("data", "raw", "tram_lines.csv"), sep = ";")
+
+# Inspect before converting
+head(tram_lines)
+
+# Convert to sf using the WKT geometry column
+tram_lines_sf <- st_as_sf(tram_lines, wkt = "geom")
+
+# Check what we got
+names(tram_lines_sf)
+st_crs(tram_lines_sf)
+st_geometry_type(tram_lines_sf) |> table()
+```
+
+```{r tram-plot}
+# Quick base plot
+plot(tram_lines_sf["strasse"], main = "Dresden tram lines")
+
+# Better: ggplot with geom_sf
+ggplot() +
+  geom_sf(data = tram_lines_sf, aes(color = historie)) +
+  scale_color_manual(values = c(AKT = "steelblue", NEU = "salmon")) +
+  labs(title = "Dresden tram network", color = "Status") +
+  theme_void()
+```
+
+### Markets
+
+```{r market-data}
+market    <- read.csv(here("data", "raw", "markets.csv"), sep = ";")
+market_sf <- st_as_sf(market, wkt = "geom")
+
+# What geometry type are markets?
+st_geometry_type(market_sf) |> table()
+
+plot(market_sf["id"], main = "Dresden markets")
+```
+
+### Combining layers
+
+Because both datasets share the same CRS, we can overlay them in a single `ggplot` call — no merging needed.
+
+```{r combined-plot}
+ggplot() +
+  geom_sf(data = tram_lines_sf, color = "steelblue", linewidth = 0.4) +
+  geom_sf(data = market_sf, color = "firebrick", size = 2) +
+  labs(title = "Dresden: tram lines and markets") +
+  theme_void()
+```
+
+::: callout-caution
+## Exercise 1 — Your turn
+
+The combined map above has no basemap, so it is hard to orient yourself.
+
+1.  Check whether the two datasets share the same CRS. If not, reproject one of them.
+2.  Add a `subtitle` to the plot that shows the CRS (hint: use `st_crs()` to extract it and paste it into the subtitle string).
+3.  **Bonus:** Add a north arrow or scale bar using the `ggspatial` package (`annotation_scale()` and `annotation_north_arrow()`).
+:::
+
+------------------------------------------------------------------------
+
+## Raster data and the `raster` package
+
+Raster data represent the world as a **grid of equally sized cells**, each containing one value. Think of them as images where every pixel stores a measurement (elevation, temperature, vegetation index, etc.).
+
+Key properties of a raster:
+
+| Property   | Meaning                      |
+|------------|------------------------------|
+| Extent     | The geographic bounding box  |
+| Resolution | Cell size (e.g. 0.5° × 0.5°) |
+| CRS        | How coordinates are defined  |
+| Values     | What each cell stores        |
+
+### Building a raster from scratch
+
+```{r raster-basic}
+raster_extent <- extent(-1.5, 1.5, -1.5, 1.5)
+
+our_raster <- raster(
+  nrows = 6, ncols = 6,
+  res   = 0.5,
+  ext   = raster_extent,
+  vals  = 1:36
+)
+
+plot(our_raster, main = "6×6 raster, resolution 0.5")
+```
+
+### Resolution and granularity
+
+```{r raster-resolution}
+# Finer resolution = more cells = more detail
+fine_raster <- raster(
+  nrows = 60, ncols = 60,
+  res   = 0.05,
+  ext   = raster_extent
+)
+values(fine_raster) <- 1:ncell(fine_raster)
+
+plot(fine_raster, main = "60×60 raster, resolution 0.05")
+```
+
+::: callout-note
+## Resolution in practice
+
+Online data sources typically report resolution in degrees. A 0.5° raster corresponds to cells of roughly 55 km × 55 km at the equator. A 0.05° raster (\~5.5 km cells) is ten times finer and ten times larger in file size.\
+When downloading data, always check the resolution against your analytical needs — finer is not always better.
+:::
+
+::: callout-caution
+## Exercise 2 — Raster resolution
+
+1.  Create a raster with the same extent as `our_raster` but with resolution `0.25`. How many cells does it have? Verify with `ncell()`.
+2.  Create another raster with resolution `1.0`. Plot both side by side using `par(mfrow = c(1, 2))`.
+3.  What is the relationship between resolution and number of cells? Write it as a formula in a comment.
+:::
+
+### Projections in raster data
+
+```{r raster-crs}
+data(volcano)
+volcano_raster <- raster(volcano)
+
+# No CRS yet
+projection(volcano_raster)
+
+# Assign WGS84 using proj4 string
+proj4_wgs84 <- "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"
+projection(volcano_raster) <- proj4_wgs84
+
+projection(volcano_raster)
+raster::plot(volcano_raster, main = "Volcano raster")
+```
+
+```{r raster-ggplot}
+# Higher quality plot via ggplot (requires converting to data frame first)
+volcano_df <- as.data.frame(volcano_raster, xy = TRUE)
+
+ggplot(volcano_df, aes(x = x, y = y, fill = layer)) +
+  geom_raster() +
+  scale_fill_gradientn(colors = terrain.colors(10)) +
+  labs(x = "Longitude", y = "Latitude",
+       title = "Volcano — ggplot rendering", fill = "Elevation") +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+## The `terra` package
+
+`terra` is the modern successor to both `raster` and parts of `sf`. It uses two unified data types:
+
+-   **`SpatVector`** — equivalent to `sf` objects (vectors)
+-   **`SpatRaster`** — equivalent to `raster` objects (rasters)
+
+`terra` is generally faster than `raster` for large files and will become the standard going forward. We introduce both here because you will encounter `raster` objects in many existing papers and scripts.
+
+### Vectors in terra
+
+```{r terra-vector}
+# Convert an sf object to SpatVector
+terra_tram <- terra::vect(tram_lines_sf)
+
+# The geometry is no longer a named column
+names(terra_tram)
+str(terra_tram)
+```
+
+### Rasters in terra
+
+```{r terra-raster}
+# Convert volcano to SpatRaster
+terra_volcano <- terra::rast(volcano)
+str(terra_volcano)
+```
+
+### Plotting in terra
+
+Always use `terra::plot()` explicitly — the function name `plot()` is shared across many packages and calling the wrong one produces confusing errors.
+
+```{r terra-plot}
+par(mfrow = c(1, 2))
+terra::plot(terra_tram,    col = "steelblue", lwd = 2, main = "Tram lines (SpatVector)")
+terra::plot(terra_volcano, col = terrain.colors(10), main = "Volcano (SpatRaster)")
+par(mfrow = c(1, 1))
+```
+
+### CRS in terra
+
+In `terra`, both `SpatVectors` and `SpatRasters` use the same functions:
+
+-   `crs()` — inspect the CRS
+-   `project()` — reproject (replaces `st_transform()` and `projectRaster()`)
+
+```{r terra-crs}
+crs(terra_tram)
+
+# Reproject to Albers Equal Area
+albers <- "+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=37.5 +lon_0=-97.5 +datum=WGS84 +units=m"
+terra_tram_albers <- project(terra_tram, albers)
+
+par(mfrow = c(1, 2))
+terra::plot(terra_tram,        main = "Original CRS")
+terra::plot(terra_tram_albers, main = "Albers Equal Area")
+par(mfrow = c(1, 1))
+```
+
+::: callout-caution
+## Exercise 3 — Package comparison
+
+Using the tram lines data:
+
+1.  Check the CRS using `st_crs()` (sf), `projection()` (raster), and `crs()` (terra). Do they return the same information in the same format?
+2.  Reproject the tram lines to EPSG:25833 (the standard projected CRS for Saxony/Germany) using both `st_transform()` and `terra::project()`. Plot both results — do they look the same?
+3.  In your own words: what is the main practical advantage of `terra` over having separate `sf` and `raster` workflows?
+:::
+
+------------------------------------------------------------------------
+
+## Summary
+
+|                   | sf               | raster              | terra                   |
+|------------------|------------------|------------------|------------------|
+| Data type         | sf / sfc         | RasterLayer / Stack | SpatVector / SpatRaster |
+| Vectors           | ✓                | ✗                   | ✓                       |
+| Rasters           | ✗                | ✓                   | ✓                       |
+| Check CRS         | `st_crs()`       | `projection()`      | `crs()`                 |
+| Assign CRS        | `st_set_crs()`   | `projection() <-`   | `crs() <-`              |
+| Reproject         | `st_transform()` | `projectRaster()`   | `project()`             |
+| ggplot compatible | ✓ (geom_sf)      | needs conversion    | needs conversion        |
+
+::: callout-tip
+## For next session
+
+Session 2 will go deeper into vector operations: downloading and loading administrative boundaries, working with the OpenStreetMap API, and performing spatial joins. Make sure you are comfortable with `st_crs()`, `st_transform()`, and `geom_sf()` before then.
+:::
+
+------------------------------------------------------------------------
+
+## Further reading {.unnumbered}
+
+-   [Geocomputation with R — Chapters 2 and 6](https://r.geocompx.org/)
+-   [R as GIS for Economists — Chapter 1](https://tmieno2.github.io/R-as-GIS-for-Economists/)
+-   [terra documentation](https://cran.r-project.org/web/packages/terra/terra.pdf)
+-   [Original course materials by Sebastian Hohmann](https://github.com/sebastianhohmann/gis_course)
